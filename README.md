@@ -148,6 +148,17 @@ python3 trello-sync.py --dry-run
 
 `scripts/trello-dispatcher.py` watches the board, routes labeled cards to Pam, Michael, Kevin, Dwight, or Milton, and keeps notifications idempotent with local SQLite dispatch state.
 
+It is the active layer that makes Trello proactive:
+
+- Polls Jason's Goal Board every 1-2 minutes when installed with the systemd timer.
+- Watches only `To-Do` and `In Progress`.
+- Maps Trello labels to the correct agent.
+- Writes local dispatch state with `card_id`, `assigned_agent`, `last_list`, `last_action_id`, `notified_at`, `claimed_at`, and escalation metadata.
+- On a new labeled `To-Do` card, notifies the assigned agent, adds the exact `Starting work` comment, and moves the card to `In Progress`.
+- Re-runs idempotently so the same card does not notify every polling cycle.
+- Re-notifies stale `To-Do` cards and escalates unclaimed work to Milton after the watchdog threshold.
+- Pings stale `In Progress` cards so the assigned agent resumes, marks blocked, or completes.
+
 ### Usage
 
 ```bash
@@ -156,6 +167,25 @@ python3 scripts/trello-dispatcher.py
 
 # Dry run
 python3 scripts/trello-dispatcher.py --dry-run
+```
+
+### systemd timer
+
+Install the one-minute dispatcher timer:
+
+```bash
+sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.service /etc/systemd/system/trello-agent-dispatcher.service
+sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.timer /etc/systemd/system/trello-agent-dispatcher.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now trello-agent-dispatcher.timer
+systemctl list-timers trello-agent-dispatcher.timer --no-pager
+```
+
+Run one pass manually:
+
+```bash
+sudo systemctl start trello-agent-dispatcher.service
+journalctl -u trello-agent-dispatcher.service -n 50 --no-pager
 ```
 
 ### Environment variables

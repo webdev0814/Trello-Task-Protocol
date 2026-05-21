@@ -10,6 +10,9 @@ A harness-agnostic task management protocol for AI agent systems. Ensures every 
 - Done cards get a short completion summary before moving
 - A sync script keeps Trello and a local `tasks.db` (SQLite) perfectly synchronised
 - A dispatcher script watches labeled cards and notifies the right agent automatically
+- The dispatcher claims new labeled To-Do cards with the exact `Starting work` comment and moves them to In Progress so the board visibly advances
+- Dispatch state is idempotent and records last list, last action, notification time, claimed time, and escalation time
+- Stale To-Do cards are re-notified and escalated to Milton; stale In Progress cards are pinged for progress
 - Daily evening report generated automatically
 
 ## Architecture
@@ -126,6 +129,15 @@ CREATE TABLE tasks (
 ## Dispatcher
 
 Run the dispatcher frequently so labeled cards are pushed to the right agent immediately. A one-minute timer is the recommended default. The script tracks notifications in SQLite so it does not spam the same card.
+
+Recommended systemd timer files are included in `systemd/`:
+
+```bash
+sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.service /etc/systemd/system/trello-agent-dispatcher.service
+sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.timer /etc/systemd/system/trello-agent-dispatcher.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now trello-agent-dispatcher.timer
+```
 
 ## Daily report
 

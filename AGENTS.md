@@ -17,9 +17,11 @@ Every task created by any agent must appear as a Trello card. No exceptions.
 
 ### New tasks → To-Do
 1. Agent creates a Trello card in the **To-Do** column
-2. Immediately logs it in the central database (`~/central-tasks/tasks.db`)
-3. Decides best assigned agent (or self-assigns)
-4. Moves card to **In Progress**
+2. Applies the assigned agent label
+3. Immediately logs it in the central database (`~/central-tasks/tasks.db`)
+4. Adds the exact comment `Starting work`
+5. Moves card to **In Progress**
+6. Begins work immediately
 
 ### In Progress
 - Agent is actively working on the task
@@ -48,12 +50,14 @@ When task is fully complete:
 
 - **Trello Agent**: creates cards, moves cards, updates comments as instructed by other agents or humans
 - **All agents**: must use Trello for all tasks; no task tracking outside Trello
-- **Central orchestrator (Milton/main)**: monitors To-Do, assigns tasks, ensures sync between Trello and database
+- **Dispatcher**: monitors labeled To-Do/In Progress cards every 1-2 minutes, notifies assigned agents, claims new To-Do cards, and escalates stale unclaimed cards
+- **Central orchestrator (Milton/main)**: receives watchdog escalations and owns routing until transfer to Michael is explicitly approved
 
 ## Permanent rules
 
 - Every task must be a Trello card
 - All tasks start in To-Do
+- Starting work requires the exact comment `Starting work`, then moving to In Progress
 - Only these four columns are used — no others
 - Blocked cards must have the exact blocked comment format before moving
 - Done cards must have a completion summary before moving

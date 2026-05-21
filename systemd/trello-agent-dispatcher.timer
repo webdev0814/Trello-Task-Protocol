@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Trello agent dispatcher every minute
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10
+Persistent=true
+Unit=trello-agent-dispatcher.service
+
+[Install]
+WantedBy=timers.target
+

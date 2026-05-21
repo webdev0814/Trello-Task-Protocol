@@ -32,6 +32,7 @@ WATCH_LISTS = ("To-Do", "In Progress")
 CLAIM_RENOTIFY_SECONDS = 5 * 60
 ESCALATE_UNCLAIMED_SECONDS = 15 * 60
 IN_PROGRESS_STALE_SECONDS = 60 * 60
+CLAIM_COMMENT = "Starting work"
 
 
 AGENT_LABELS = {
@@ -136,7 +137,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             assigned_agent TEXT NOT NULL,
             last_list TEXT NOT NULL,
             last_activity TEXT,
+            last_action_id TEXT,
             notified_at INTEGER,
+            claimed_at INTEGER,
             escalated_at INTEGER,
             dispatch_count INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
@@ -154,6 +157,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.commit()
+    existing = [row[1] for row in conn.execute("PRAGMA table_info(trello_dispatch_state)").fetchall()]
+    if "last_action_id" not in existing:
+        conn.execute("ALTER TABLE trello_dispatch_state ADD COLUMN last_action_id TEXT")
+    if "claimed_at" not in existing:
+        conn.execute("ALTER TABLE trello_dispatch_state ADD COLUMN claimed_at INTEGER")
     conn.commit()
 
 
@@ -247,6 +256,31 @@ def trello_comment(card_id: str, text: str) -> None:
     trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": text})
 
 
+def move_card(card_id: str, list_id: str) -> None:
+    trello(f"/cards/{card_id}", method="PUT", data={"idList": list_id})
+
+
+def card_actions(card_id: str) -> list[dict]:
+    actions = trello(
+        f"/cards/{card_id}/actions?filter=commentCard,updateCard:idList&limit=10&fields=id,type,date,data"
+    )
+    return actions or []
+
+
+def latest_action_id(actions: list[dict]) -> str | None:
+    return actions[0].get("id") if actions else None
+
+
+def has_start_comment(actions: list[dict]) -> bool:
+    for action in actions:
+        if action.get("type") != "commentCard":
+            continue
+        text = ((action.get("data") or {}).get("text") or "").strip().lower()
+        if text.startswith(CLAIM_COMMENT.lower()) or "starting work" in text:
+            return True
+    return False
+
+
 def shell(args: list[str], timeout: int = 30) -> tuple[int, str]:
     proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
     return proc.returncode, proc.stdout[-2000:]
@@ -261,7 +295,7 @@ def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
         f"Reason: {reason}\n\n"
         "Required protocol:\n"
         "1. Open/review the Trello card.\n"
-        "2. If it is in To-Do, add a starting comment and move it to In Progress.\n"
+        "2. If it is in To-Do, add the exact starting comment 'Starting work' and move it to In Progress.\n"
         "3. Work the task immediately.\n"
         "4. If blocked, add the exact BLOCKED comment format and move it to Blocked.\n"
         "5. If complete, add a short completion summary and move it to Done.\n"
@@ -307,7 +341,7 @@ def notify_hermes(agent: str, card: dict, list_name: str, reason: str) -> tuple[
         f"cat > {remote_file}; "
         "nohup bash -lc "
         + shlex.quote(
-            f"HERMES_PROFILE={profile} hermes chat -q \"$(cat {remote_file})\" --source trello-dispatcher --yolo >> {log_path} 2>&1"
+            f"HERMES_PROFILE={profile} hermes chat --provider deepseek --model deepseek-v4-flash -q \"$(cat {remote_file})\" --source trello-dispatcher --yolo >> {log_path} 2>&1"
         )
         + " </dev/null >/dev/null 2>&1 &"
     )
@@ -337,11 +371,11 @@ def notify_agent(agent: str, card: dict, list_name: str, reason: str) -> tuple[b
     return False, f"No notifier configured for {agent}"
 
 
-def should_notify(state, list_name: str, date_last_activity: str | None) -> tuple[bool, str]:
+def should_notify(state, list_name: str, date_last_activity: str | None, action_id: str | None) -> tuple[bool, str]:
     now = unix_now()
     if state is None:
         return True, "new labeled/assigned card"
-    _, _, last_list, last_activity, notified_at, escalated_at, dispatch_count, _ = state
+    _, _, last_list, last_activity, last_action_id, notified_at, claimed_at, escalated_at, dispatch_count, _ = state
     notified_at = notified_at or 0
     if last_list != list_name:
         return True, f"card moved from {last_list} to {list_name}"
@@ -356,8 +390,11 @@ def maybe_escalate(conn: sqlite3.Connection, card: dict, list_name: str, agent: 
     if list_name != "To-Do" or agent == "Milton" or state is None:
         return
     now = unix_now()
-    notified_at = state[4] or now
-    escalated_at = state[5] or 0
+    notified_at = state[5] or now
+    claimed_at = state[6] or 0
+    escalated_at = state[7] or 0
+    if claimed_at:
+        return
     if now - notified_at < ESCALATE_UNCLAIMED_SECONDS or now - escalated_at < ESCALATE_UNCLAIMED_SECONDS:
         return
     ok, out = notify_milton(card, list_name, f"{agent} has not claimed this To-Do card within 15 minutes")
@@ -392,12 +429,15 @@ def dispatch_once(dry_run: bool = False) -> int:
                 continue
             agent = choose_agent(card)
             upsert_task(conn, card, list_name, agent)
+            actions = card_actions(card["id"])
+            action_id = latest_action_id(actions)
+            claimed_at = unix_now() if list_name == "In Progress" or has_start_comment(actions) else None
             state = conn.execute(
-                "SELECT trello_card_id, assigned_agent, last_list, last_activity, notified_at, escalated_at, dispatch_count, updated_at "
+                "SELECT trello_card_id, assigned_agent, last_list, last_activity, last_action_id, notified_at, claimed_at, escalated_at, dispatch_count, updated_at "
                 "FROM trello_dispatch_state WHERE trello_card_id = ?",
                 (card["id"],),
             ).fetchone()
-            notify, reason = should_notify(state, list_name, card.get("dateLastActivity"))
+            notify, reason = should_notify(state, list_name, card.get("dateLastActivity"), action_id)
             if notify:
                 if dry_run:
                     print(f"Would notify {agent}: {card.get('name')} ({reason})")
@@ -405,27 +445,45 @@ def dispatch_once(dry_run: bool = False) -> int:
                 ok, out = notify_agent(agent, card, list_name, reason)
                 if ok:
                     dispatched += 1
+                    if list_name == "To-Do":
+                        trello_comment(card["id"], CLAIM_COMMENT)
+                        move_card(card["id"], lists["In Progress"])
+                        list_name = "In Progress"
+                        claimed_at = unix_now()
+                        conn.execute(
+                            "UPDATE tasks SET status = ?, trello_list = ?, updated_at = ? WHERE trello_card_id = ?",
+                            (list_name, list_name, utc_now(), card["id"]),
+                        )
                     trello_comment(card["id"], f"Dispatcher notified {agent}. Reason: {reason}.")
+                    updated_actions = card_actions(card["id"])
+                    action_id = latest_action_id(updated_actions) or action_id
                     conn.execute(
                         """
                         INSERT INTO trello_dispatch_state (
-                            trello_card_id, assigned_agent, last_list, last_activity,
-                            notified_at, escalated_at, dispatch_count, updated_at
+                            trello_card_id, assigned_agent, last_list, last_activity, last_action_id,
+                            notified_at, claimed_at, escalated_at, dispatch_count, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULL, 1, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?)
                         ON CONFLICT(trello_card_id) DO UPDATE SET
                             assigned_agent = excluded.assigned_agent,
                             last_list = excluded.last_list,
                             last_activity = excluded.last_activity,
+                            last_action_id = excluded.last_action_id,
                             notified_at = excluded.notified_at,
+                            claimed_at = COALESCE(excluded.claimed_at, trello_dispatch_state.claimed_at),
                             dispatch_count = trello_dispatch_state.dispatch_count + 1,
                             updated_at = excluded.updated_at
                         """,
-                        (card["id"], agent, list_name, card.get("dateLastActivity"), unix_now(), utc_now()),
+                        (card["id"], agent, list_name, card.get("dateLastActivity"), action_id, unix_now(), claimed_at, utc_now()),
                     )
                     add_event(conn, card["id"], "agent_notified", f"{agent}: {reason}")
                 else:
                     add_event(conn, card["id"], "agent_notify_failed", f"{agent}: {out}")
+            elif state and (action_id != state[4] or (claimed_at and not state[6])):
+                conn.execute(
+                    "UPDATE trello_dispatch_state SET last_list = ?, last_activity = ?, last_action_id = ?, claimed_at = COALESCE(claimed_at, ?), updated_at = ? WHERE trello_card_id = ?",
+                    (list_name, card.get("dateLastActivity"), action_id, claimed_at, utc_now(), card["id"]),
+                )
             maybe_escalate(conn, card, list_name, agent, state)
         conn.commit()
     finally:
