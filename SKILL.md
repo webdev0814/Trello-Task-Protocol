@@ -9,6 +9,7 @@ A harness-agnostic task management protocol for AI agent systems. Ensures every 
 - Blocked cards get a structured comment: reason, unblock requirements, who needs to act, estimated resolution, workaround
 - Done cards get a short completion summary before moving
 - A sync script keeps Trello and a local `tasks.db` (SQLite) perfectly synchronised
+- A dispatcher script watches labeled cards and notifies the right agent automatically
 - Daily evening report generated automatically
 
 ## Architecture
@@ -70,6 +71,13 @@ cp scripts/trello-sync.py /path/to/central-tasks/scripts/trello-sync.py
 chmod +x /path/to/central-tasks/scripts/trello-sync.py
 ```
 
+### 4. Install the dispatcher
+
+```bash
+cp scripts/trello-dispatcher.py /path/to/central-tasks/scripts/trello-dispatcher.py
+chmod +x /path/to/central-tasks/scripts/trello-dispatcher.py
+```
+
 ### 4. Initialise the database
 
 ```bash
@@ -114,6 +122,10 @@ CREATE TABLE tasks (
   completion_summary TEXT
 );
 ```
+
+## Dispatcher
+
+Run the dispatcher frequently so labeled cards are pushed to the right agent immediately. A one-minute timer is the recommended default. The script tracks notifications in SQLite so it does not spam the same card.
 
 ## Daily report
 

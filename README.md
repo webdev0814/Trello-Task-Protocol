@@ -144,6 +144,20 @@ python3 trello-sync.py --report
 python3 trello-sync.py --dry-run
 ```
 
+## The dispatcher
+
+`scripts/trello-dispatcher.py` watches the board, routes labeled cards to Pam, Michael, Kevin, Dwight, or Milton, and keeps notifications idempotent with local SQLite dispatch state.
+
+### Usage
+
+```bash
+# Run one dispatch pass
+python3 scripts/trello-dispatcher.py
+
+# Dry run
+python3 scripts/trello-dispatcher.py --dry-run
+```
+
 ### Environment variables
 
 | Variable | Description |
@@ -201,6 +215,7 @@ The protocol is harness-agnostic. The agent files (SKILL.md, AGENTS.md, etc.) ar
 | `HEARTBEAT.md` | Periodic sync checklist (every ~5 min + daily report). |
 | `USER.md` | User-specific config: board URL, reporting channel, schedule. |
 | `scripts/trello-sync.py` | The sync engine. Python 3, SQLite + Trello API. |
+| `scripts/trello-dispatcher.py` | Dispatch layer that notifies assigned agents and escalates stale cards. |
 | `LICENSE` | MIT — free to use, modify, distribute. |
 
 ---
