@@ -305,20 +305,40 @@ def shell(args: list[str], timeout: int = 30) -> tuple[int, str]:
 
 
 def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
+    api_url = os.environ.get("TRELLO_PROXY_URL", "https://141.148.88.85/trello-api")
+    desc = card.get("desc") or "(no description)"
+    card_id = card.get("id", "")
+    short_link = card.get("shortLink", card_id[:8] if card_id else "")
+    add_comment_example = '{"cardId":"ID","text":"..."}'
+    move_card_example = '{"cardId":"ID","listId":"LIST_ID"}'
+    create_card_example = '{"name":"...","idList":"LIST_ID"}'
+    api_url_display = api_url  # use the env variable
     return (
         f"Trello task assigned to {agent}.\n\n"
         f"Card: {card.get('name', '')}\n"
         f"List: {list_name}\n"
         f"URL: {card.get('url', BOARD_URL)}\n"
-        f"Reason: {reason}\n\n"
+        f"Reason: {reason}\n"
+        f"Card ID: {card_id}\n"
+        f"Short link: {short_link}\n\n"
+        "=== Trello API ===\n"
+        "The Trello board is now PUBLIC, so you can read cards at the URL above without authentication.\n"
+        f"For WRITE operations (comment, move, create), use this Trello API proxy:\n"
+        f"  Proxy URL: {api_url}\n"
+        f"  - Read card details:   curl {api_url}/card/<shortLink>\n"
+        f"  - Add comment:         curl -X PUT {api_url}/add-comment -d '{add_comment_example}'\n"
+        f"  - Move card:           curl -X PUT {api_url}/move-card -d '{move_card_example}'\n"
+        f"  - Create card:         curl -X POST {api_url}/create-card -d '{create_card_example}'\n"
+        f"  - List all lists:      curl -X POST {api_url}/list-lists\n"
+        f"  - List all labels:     curl -X POST {api_url}/list-labels\n\n"
         "Required protocol:\n"
-        "1. Open/review the Trello card.\n"
+        "1. Read the Trello card details first.\n"
         "2. If it is in To-Do, add the exact starting comment 'Starting work' and move it to In Progress.\n"
         "3. Work the task immediately.\n"
         "4. If blocked, add the exact BLOCKED comment format and move it to Blocked.\n"
         "5. If complete, add a short completion summary and move it to Done.\n"
         "6. Do not create duplicate cards for this same work.\n\n"
-        f"Description:\n{card.get('desc') or '(no description)'}"
+        f"Description:\n{desc}"
     )
 
 

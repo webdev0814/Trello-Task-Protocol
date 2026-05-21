@@ -302,3 +302,34 @@ Contributions welcome. Please keep the protocol harness-agnostic — no OpenClaw
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Trello API Proxy
+
+Hermes agents use a Trello API proxy to perform write operations on the board
+without needing their own API credentials. The proxy runs on Milton's machine
+and is accessible via nginx at `https://141.148.88.85/trello-api/`.
+
+### Available Endpoints
+
+All endpoints are relative to `https://141.148.88.85/trello-api/`.
+
+| Method | Path | Description | Required Fields |
+|--------|------|-------------|-----------------|
+| GET | /card/⟨shortLink⟩ | Read card details | — |
+| PUT | /move-card | Move card to list | `cardId`, `listId` |
+| PUT | /add-comment | Add comment | `cardId`, `text` |
+| POST | /create-card | Create new card | `name`, `idList` (optional: `desc`) |
+| POST | /add-label | Add label to card | `cardId`, `labelId` |
+| POST | /list-labels | List board labels | — |
+| POST | /list-lists | List board lists | — |
+
+### Authentication
+
+The proxy authenticates clients via HMAC-SHA256 signature. Include the header:
+`X-Webhook-Signature: ⟨hex-encoded-HMAC-of-body⟩`
+The shared secret is stored at `~/.openclaw/webhook_secret` on the Hermes VPS.
+
+### Environment Variables
+
+- `TRELLO_PROXY_URL` — set on each agent to the proxy base URL
+  (default: `https://141.148.88.85/trello-api`)

@@ -1,257 +1,308 @@
 #!/usr/bin/env python3
-"""
-Trello Task Sync — Agent Task Management Protocol
-Harness-agnostic: works with OpenClaw, Hermes, or any AI agent system.
-MIT License.
+"""Synchronize Jason's Trello task board with the central task database."""
 
-Syncs a Trello board with a local SQLite database. Run on a schedule
-or trigger it after any card operation.
+from __future__ import annotations
 
-Usage:
-    python3 trello-sync.py [--init] [--report] [--dry-run]
-"""
-
-import os
-import sys
-import sqlite3
 import argparse
 import json
-import subprocess
-from datetime import datetime, date
-from typing import Optional
-
-# ── Config ──────────────────────────────────────────────────────────────────
-
-TRELLO_API_KEY  = os.environ.get("TRELLO_API_KEY", "")
-TRELLO_TOKEN    = os.environ.get("TRELLO_TOKEN", "")
-TRELLO_BOARD_ID = os.environ.get("TRELLO_BOARD_ID", "")
-
-TRELLO_BASE = "https://api.trello.com/1"
-DB_PATH     = os.environ.get("TASKS_DB", os.path.join(os.environ["HOME"], "central-tasks", "tasks.db"))
-
-COLUMNS = {"To-Do": "todo", "In Progress": "in_progress", "Blocked": "blocked", "Done": "done"}
+import os
+import sqlite3
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 
 
-# ── Trello API helpers ───────────────────────────────────────────────────────
-
-def trello_get(path: str, params: dict = None) -> dict:
-    import requests
-    params = params or {}
-    params["key"] = TRELLO_API_KEY
-    params["token"] = TRELLO_TOKEN
-    r = requests.get(f"{TRELLO_BASE}{path}", params=params, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
-def trello_post(path: str, data: dict = None) -> dict:
-    import requests
-    data = data or {}
-    data["key"] = TRELLO_API_KEY
-    data["token"] = TRELLO_TOKEN
-    r = requests.post(f"{TRELLO_BASE}{path}", json=data, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
-# ── Database ─────────────────────────────────────────────────────────────────
-
-def get_db() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+BOARD_ID = "Fi5EnmrN"
+BOARD_URL = "https://trello.com/b/Fi5EnmrN/jasons-goal-board"
+DB_PATH = "/home/ubuntu/central-tasks/tasks.db"
+CREDS_PATH = "/home/ubuntu/.openclaw/trello_credentials.json"
+ENV_PATHS = ("/home/ubuntu/.openclaw/.env", "/home/ubuntu/openclaw/.env")
+ALLOWED_LISTS = ("To-Do", "In Progress", "Blocked", "Done")
+AGENT_LABELS = {
+    "pam": "Pam",
+    "pam beesly": "Pam",
+    "pam 🐻": "Pam",
+    "concierge": "Pam",
+    "michael": "Michael",
+    "michael scott": "Michael",
+    "michael 🎤": "Michael",
+    "kevin": "Kevin",
+    "kevin malone": "Kevin",
+    "kevin 🧮": "Kevin",
+    "dwight": "Dwight",
+    "dwight schrute": "Dwight",
+    "dwight 🏃": "Dwight",
+    "milton": "Milton",
+    "milton 🦞": "Milton",
+    "orchestrator": "Milton",
+}
 
 
-def init_db():
-    conn = get_db()
-    conn.execute("""
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_creds() -> tuple[str, str]:
+    api_key = os.environ.get("TRELLO_API_KEY")
+    token = os.environ.get("TRELLO_TOKEN")
+    if api_key and token:
+        return api_key, token
+    if os.path.exists(CREDS_PATH):
+        with open(CREDS_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data["api_key"], data["token"]
+    env = {}
+    for path in ENV_PATHS:
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip().strip("'\"")
+    api_key = env.get("TRELLO_API_KEY")
+    token = env.get("TRELLO_TOKEN")
+    if api_key and token:
+        return api_key, token
+    raise RuntimeError("Trello credentials not found in env, credentials JSON, or OpenClaw .env")
+
+
+def trello(path: str, method: str = "GET", data: dict[str, str] | None = None):
+    api_key, token = load_creds()
+    params = {"key": api_key, "token": token}
+    url = "https://api.trello.com/1" + path
+    encoded = None
+    if method in {"GET", "DELETE"}:
+        sep = "&" if "?" in url else "?"
+        url = url + sep + urllib.parse.urlencode(params)
+    else:
+        payload = dict(params)
+        if data:
+            payload.update(data)
+        encoded = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=encoded, method=method)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = resp.read().decode("utf-8")
+    return json.loads(body) if body else None
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS tasks (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            trello_card_id    TEXT UNIQUE NOT NULL,
-            title             TEXT NOT NULL,
-            description       TEXT,
-            status            TEXT NOT NULL,
-            column_name       TEXT NOT NULL,
-            assigned_agent    TEXT,
-            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at      DATETIME,
-            blocked_reason    TEXT,
-            completion_summary TEXT
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trello_card_id TEXT UNIQUE,
+            trello_short_link TEXT,
+            trello_url TEXT,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL,
+            trello_list TEXT NOT NULL,
+            assigned_agent TEXT,
+            source TEXT NOT NULL DEFAULT 'trello',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            blocked_comment TEXT
         )
-    """)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trello_sync_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trello_card_id TEXT,
+            event_type TEXT NOT NULL,
+            detail TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
-    conn.close()
-    print(f"[OK] Database initialised at {DB_PATH}")
 
 
-# ── Sync logic ───────────────────────────────────────────────────────────────
+def list_map() -> dict[str, str]:
+    lists = trello(f"/boards/{BOARD_ID}/lists?fields=name,id")
+    found = {item["name"]: item["id"] for item in lists if item["name"] in ALLOWED_LISTS}
+    missing = [name for name in ALLOWED_LISTS if name not in found]
+    if missing:
+        raise RuntimeError(f"Missing required Trello lists: {', '.join(missing)}")
+    return found
 
-def fetch_board_state() -> tuple[list[dict], list[dict]]:
-    """Returns (lists, cards)."""
-    lists  = trello_get(f"/boards/{TRELLO_BOARD_ID}/lists")
-    cards  = trello_get(f"/boards/{TRELLO_BOARD_ID}/cards")
-    return lists, cards
+
+def choose_agent(card: dict) -> str:
+    for label in card.get("labels") or []:
+        name = (label.get("name") or "").strip().lower()
+        if name in AGENT_LABELS:
+            return AGENT_LABELS[name]
+    text = f"{card.get('name', '')}\n{card.get('desc', '')}".lower()
+    if "kevin" in text or "🧮" in text:
+        return "Kevin"
+    if "dwight" in text or "🏃" in text:
+        return "Dwight"
+    if "pam" in text or "🐻" in text:
+        return "Pam"
+    if "michael" in text or "🎤" in text:
+        return "Michael"
+    if "jim" in text or "🏀" in text:
+        return "Dwight"
+    if any(word in text for word in ("money", "account", "invoice", "tax", "budget", "finance", "grant", "credit", "refund", "subscription", "billing")):
+        return "Kevin"
+    if any(word in text for word in ("code", "program", "script", "qa", "test", "verify", "ops", "server", "deploy")):
+        return "Dwight"
+    if any(word in text for word in ("email", "calendar", "schedule", "admin", "document", "follow up")):
+        return "Pam"
+    if any(word in text for word in ("contract", "government", "veteran", "certification", "strategy", "research")):
+        return "Michael"
+    return "Milton"
 
 
-def sync():
-    conn = get_db()
-    lists, cards = fetch_board_state()
+def db_task(conn: sqlite3.Connection, card_id: str):
+    return conn.execute("SELECT id, status, assigned_agent FROM tasks WHERE trello_card_id = ?", (card_id,)).fetchone()
 
-    # Build list_id → column_name map
-    list_map = {l["id"]: l["name"] for l in lists}
 
-    created_today = 0
-    active_count  = 0
-    blocked_list  = []
+def upsert_card(conn: sqlite3.Connection, card: dict, list_name: str, agent: str | None = None) -> None:
+    now = utc_now()
+    existing = db_task(conn, card["id"])
+    assigned = agent or (existing[2] if existing else None) or choose_agent(card)
+    completed_at = now if list_name == "Done" else None
+    conn.execute(
+        """
+        INSERT INTO tasks (
+            trello_card_id, trello_short_link, trello_url, title, description, status,
+            trello_list, assigned_agent, created_at, updated_at, completed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trello_card_id) DO UPDATE SET
+            title = excluded.title,
+            description = excluded.description,
+            status = excluded.status,
+            trello_list = excluded.trello_list,
+            assigned_agent = excluded.assigned_agent,
+            updated_at = excluded.updated_at,
+            completed_at = CASE WHEN excluded.status = 'Done' THEN excluded.completed_at ELSE tasks.completed_at END
+        """,
+        (
+            card["id"],
+            card.get("shortLink"),
+            card.get("url"),
+            card.get("name", ""),
+            card.get("desc", ""),
+            list_name,
+            list_name,
+            assigned,
+            now,
+            now,
+            completed_at,
+        ),
+    )
+    conn.commit()
 
-    for card in cards:
-        col_name = list_map.get(card["idList"], "")
-        if col_name not in COLUMNS:
-            continue  # skip columns not in our protocol
 
-        status = COLUMNS[col_name]
-        now    = datetime.utcnow().isoformat()
+def add_comment(card_id: str, text: str) -> None:
+    trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": text})
 
-        row = conn.execute(
-            "SELECT id, status FROM tasks WHERE trello_card_id = ?",
-            (card["id"],)
-        ).fetchone()
 
-        if row is None:
-            conn.execute("""
-                INSERT INTO tasks (trello_card_id, title, description, status, column_name, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (card["id"], card["name"], card.get("desc", "") or "",
-                  status, col_name, now, now))
-            created_today += 1
-            active_count  += 1
-        else:
-            conn.execute("""
-                UPDATE tasks
-                SET status = ?, column_name = ?, updated_at = ?,
-                    completed_at = CASE WHEN ? = 'done' AND status != 'done' THEN ? ELSE completed_at END
-                WHERE trello_card_id = ?
-            """, (status, col_name, now,
-                  status, now, card["id"]))
-            if status != "done":
-                active_count += 1
+def move_card(card_id: str, list_id: str) -> None:
+    trello(f"/cards/{card_id}", method="PUT", data={"idList": list_id})
 
-        # Check for blocked cards
-        if col_name == "Blocked":
-            # Fetch the last blocked comment from card actions
-            try:
-                actions = trello_get(f"/cards/{card['id']}/actions", {"filter": "comment"})
-                blocked = next((a["data"]["text"] for a in reversed(actions)
-                               if "🔴 BLOCKED" in (a["data"].get("text") or "")), None)
+
+def sync_once() -> None:
+    lists = list_map()
+    reverse = {v: k for k, v in lists.items()}
+    cards = trello(f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed&labels=all")
+    conn = sqlite3.connect(DB_PATH)
+    ensure_schema(conn)
+    try:
+        for card in cards:
+            if card.get("closed"):
+                continue
+            if (card.get("name") or "").strip().lower().startswith(("📌 how to use this column", "how to use this column")):
+                continue
+            list_name = reverse.get(card["idList"])
+            if not list_name:
+                continue
+            agent = choose_agent(card)
+            was_known = db_task(conn, card["id"]) is not None
+            upsert_card(conn, card, list_name, agent)
+            if list_name == "To-Do":
+                prefix = "Registered new Trello task" if not was_known else "Re-queued Trello task"
+                add_comment(
+                    card["id"],
+                    f"{prefix} in central task database. Assigned agent: {agent}. Awaiting agent claim.",
+                )
+                conn.execute(
+                    "INSERT INTO trello_sync_events (trello_card_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",
+                    (card["id"], "todo_registered", f"Assigned to {agent}; dispatcher will notify agent", utc_now()),
+                )
+                conn.commit()
+            elif list_name == "Blocked":
+                actions = trello(f"/cards/{card['id']}/actions?filter=commentCard&limit=10")
+                blocked = next((a.get("data", {}).get("text", "") for a in actions if "🔴 BLOCKED" in a.get("data", {}).get("text", "")), None)
+                if not blocked:
+                    blocked = (
+                        "🔴 BLOCKED\n"
+                        "Reason: Existing Blocked card did not include the required blocked details.\n"
+                        "Needed to Unblock: Assigned agent must inspect the task and replace this with the specific blocker.\n"
+                        f"Who needs to act: {agent}\n"
+                        "Estimated resolution time: Once the assigned agent reviews the card.\n"
+                        "Workaround (if any): Keep the card in Blocked until the specific blocker is documented."
+                    )
+                    add_comment(card["id"], blocked)
                 if blocked:
                     conn.execute(
-                        "UPDATE tasks SET blocked_reason = ? WHERE trello_card_id = ?",
-                        (blocked, card["id"])
+                        "UPDATE tasks SET blocked_comment = ?, updated_at = ? WHERE trello_card_id = ?",
+                        (blocked, utc_now(), card["id"]),
                     )
-            except Exception:
-                pass
-
-        # Check for completion summary on Done cards
-        if col_name == "Done":
-            try:
-                actions = trello_get(f"/cards/{card['id']}/actions", {"filter": "comment"})
-                done = next((a["data"]["text"] for a in reversed(actions)
-                             if "✅" in (a["data"].get("text") or "") or
-                                "completed" in (a["data"].get("text") or "").lower()), None)
-                if done:
-                    conn.execute(
-                        "UPDATE tasks SET completion_summary = ? WHERE trello_card_id = ?",
-                        (done, card["id"])
-                    )
-            except Exception:
-                pass
-
-    conn.commit()
-    conn.close()
-
-    print(f"[SYNC] {created_today} new cards | {active_count} active tasks")
-    return active_count, blocked_list
+                    conn.commit()
+    finally:
+        conn.close()
 
 
-def report():
-    conn = get_db()
-    today = date.today().isoformat()
-
-    rows = conn.execute(
-        "SELECT * FROM tasks ORDER BY column_name, created_at"
+def daily_report() -> str:
+    conn = sqlite3.connect(DB_PATH)
+    ensure_schema(conn)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    created = conn.execute(
+        "SELECT title, status, assigned_agent, trello_url FROM tasks WHERE substr(created_at, 1, 10) = ? ORDER BY created_at",
+        (today,),
     ).fetchall()
-
-    lines = ["📋 *Daily Trello Report*", ""]
-
-    # Created today
-    created = [r for r in rows if str(r["created_at"]).startswith(today)]
-    if created:
-        lines.append(f"✅ *Created today:* {len(created)}")
-        for r in created:
-            lines.append(f"  • {r['title']} → {r['column_name']}")
-        lines.append("")
-
-    # Active
-    active = [r for r in rows if r["status"] not in ("done",)]
-    if active:
-        lines.append(f"📌 *Active tasks ({len(active)}):*")
-        for r in active:
-            lines.append(f"  [{r['column_name']}] {r['title']}")
-            if r.get("assigned_agent"):
-                lines.append(f"    Assigned: {r['assigned_agent']}")
-        lines.append("")
-
-    # Blocked
-    blocked = [r for r in rows if r["status"] == "blocked"]
-    if blocked:
-        lines.append(f"🔴 *Blocked ({len(blocked)}):*")
-        for r in blocked:
-            lines.append(f"  • {r['title']}")
-            if r.get("blocked_reason"):
-                lines.append(f"    {r['blocked_reason']}")
-        lines.append("")
-
-    # Done today
-    done_today = [r for r in rows if r["status"] == "done" and r.get("completed_at", "").startswith(today)]
-    if done_today:
-        lines.append(f"🏁 *Done today:* {len(done_today)}")
-        for r in done_today:
-            lines.append(f"  • {r['title']}")
-            if r.get("completion_summary"):
-                lines.append(f"    {r['completion_summary']}")
-
+    active = conn.execute(
+        "SELECT title, status, assigned_agent, trello_url FROM tasks WHERE status != 'Done' ORDER BY status, updated_at DESC"
+    ).fetchall()
+    blocked = conn.execute(
+        "SELECT title, assigned_agent, COALESCE(blocked_comment, '') FROM tasks WHERE status = 'Blocked' ORDER BY updated_at DESC"
+    ).fetchall()
     conn.close()
-    print("\n".join(lines))
+    lines = [f"Daily Trello Report — {today}", "", "Tasks created today:"]
+    lines.extend([f"- [{t}]({u or BOARD_URL}) — {s} — {a or 'unassigned'}" for t, s, a, u in created] or ["- None"])
+    lines.extend(["", "Active tasks:"])
+    lines.extend([f"- [{t}]({u or BOARD_URL}) — {s} — {a or 'unassigned'}" for t, s, a, u in active] or ["- None"])
+    lines.extend(["", "Blocked tasks:"])
+    lines.extend([f"- {t} | {a or 'unassigned'}\n{c or 'No blocked comment found'}" for t, a, c in blocked] or ["- None"])
     return "\n".join(lines)
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
-def check_config():
-    missing = [k for k in (TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID) if not k]
-    if missing:
-        print(f"[ERROR] Missing environment variables: {', '.join(missing)}", file=sys.stderr)
-        print("Set TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID before running.", file=sys.stderr)
-        sys.exit(1)
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", action="store_true")
+    args = parser.parse_args()
+    if args.report:
+        sync_once()
+        print(daily_report())
+    else:
+        sync_once()
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Trello Task Sync")
-    parser.add_argument("--init",   action="store_true", help="Initialise the database")
-    parser.add_argument("--report", action="store_true", help="Print daily report")
-    parser.add_argument("--dry-run", action="store_true", help="Read-only sync check")
-    args = parser.parse_args()
-
-    if args.init:
-        init_db()
-    elif args.report:
-        check_config()
-        report()
-    else:
-        check_config()
-        if args.dry_run:
-            print("[DRY RUN] Config OK, would sync.")
-        else:
-            sync()
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"trello-sync failed: {exc}", file=sys.stderr)
+        time.sleep(1)
+        raise
