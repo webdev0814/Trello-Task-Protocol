@@ -64,3 +64,9 @@ When task is fully complete:
 - Done cards must have a completion summary before moving
 - Trello and `tasks.db` must always be in sync
 - Cards labeled `Jason` are reserved for the human and must not be claimed, moved, or dispatched by agents
+
+## Hard Rule: Agents Must Label Their Own Cards
+
+When creating a Trello card, you MUST immediately apply your agent label to it
+(e.g., `Kevin 🧮`, `Michael 🎤`, `Dwight 🏃`, `Pam 🐻`). Unlabeled cards in
+To-Do will NOT be dispatched automatically.

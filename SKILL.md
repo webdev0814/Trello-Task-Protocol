@@ -1,184 +1,45 @@
-# Trello Task Protocol — Agent Skill
+## Rule: Agents Must Label Their Own Cards
 
-A harness-agnostic task management protocol for AI agent systems. Ensures every task created by any agent is tracked in Trello with strict column rules, synchronised to a local SQLite database, and enforced across all agents.
+When any agent creates a new Trello card, they MUST:
+1. Immediately apply their own agent label (e.g., `Kevin 🧮`, `Michael 🎤`, `Dwight 🏃`, `Pam 🐻`, `Milton 🦞`)
+2. Place the card in `To-Do` by default
+3. Add the initial comment "Starting work" and move it to `In Progress`
 
-## What it does
+This is enforced because:
+- The Trello dispatcher routes cards **only by label and title keywords**
+- An unlabeled card will sit in `To-Do` forever without being dispatched
+- The dispatcher's `choose_agent()` function falls back to keyword matching (e.g., "tax" → Kevin), but label priority ensures correct routing
 
-- Every task created by any agent → Trello card in **To-Do** column
-- Agents move cards through: **To-Do → In Progress → Blocked → Done**
-- Blocked cards get a structured comment: reason, unblock requirements, who needs to act, estimated resolution, workaround
-- Done cards get a short completion summary before moving
-- A sync script keeps Trello and a local `tasks.db` (SQLite) perfectly synchronised
-- A dispatcher script watches labeled cards and notifies the right agent automatically
-- The dispatcher claims new labeled To-Do cards with the exact `Starting work` comment and moves them to In Progress so the board visibly advances
-- Dispatch state is idempotent and records last list, last action, notification time, claimed time, and escalation time
-- Stale To-Do cards are re-notified and escalated to Milton; stale In Progress cards are pinged for progress
-- Cards labeled `Jason` are human-owned and are ignored by all agent automation
-- Daily evening report generated automatically
+### Enforcement in the dispatcher
 
-## Architecture
+The dispatcher at `scripts/trello-dispatcher.py` will:
+- Skip `Jason`-labeled cards silently
+- If a `Jason`-labeled card also detects an agent name/keyword in the title, log a warning
+- Auto-claim cards it notifies by adding "Starting work" and moving them to `In Progress`
+- Watchdog: If a `To-Do` card stays unclaimed for 15 minutes, notify Milton
 
-```
-Agent (any harness)
-  → creates task → Trello card (To-Do column)
-  → moves card → In Progress / Blocked / Done
-  → sync script → central tasks.db (SQLite)
-  → daily report cron → Telegram / channel
-```
+## Trello API Proxy
 
-## Four columns only
+Hermes agents use a Trello API proxy to perform write operations on the board
+without needing their own API credentials. The proxy runs on Milton's machine
+and is accessible via nginx at `https://141.148.88.85/trello-api/`.
 
-- **To-Do** — new tasks only; agent reviews, logs to DB, assigns, moves to In Progress
-- **In Progress** — agent started work; progress comments added as needed
-- **Blocked** — work cannot continue; structured comment required (see below)
-- **Done** — task complete; short summary comment required before moving
+### Available Endpoints
 
-## Blocked card format
+All endpoints are relative to `https://141.148.88.85/trello-api/`.
 
-When a card is blocked, the agent must add this exact format as a card comment:
+| Method | Path | Description | Required Fields |
+|--------|------|-------------|-----------------|
+| GET | /card/⟨shortLink⟩ | Read card details | — |
+| PUT | /move-card | Move card to list | `cardId`, `listId` |
+| PUT | /add-comment | Add comment | `cardId`, `text` |
+| POST | /create-card | Create new card | `name`, `idList` (optional: `desc`) |
+| POST | /add-label | Add label to card | `cardId`, `labelId` |
+| POST | /list-labels | List board labels | — |
+| POST | /list-lists | List board lists | — |
 
-```
-🔴 BLOCKED
-Reason: [clear explanation of what is blocking the task]
-Needed to Unblock: [specific thing required — e.g., "Jason's approval", "waiting for info Y"]
-Who needs to act: [person / agent responsible]
-Estimated resolution: [e.g., "once Jason replies", "2 hours after receiving Z"]
-Workaround (if any): [temporary solution the agent suggests]
-```
+### Board Visibility
 
-## Installation
-
-### 1. Copy the skill files to your agent workspace
-
-```bash
-# For OpenClaw agents, copy into the agent's workspace directory
-cp -r SKILL.md AGENTS.md IDENTITY.md TOOLS.md SOUL.md HEARTBEAT.md USER.md ~/openclaw/agents/<agent-name>/
-
-# For Hermes/Paperclip agents, copy into the agent's workspace
-cp -r SKILL.md AGENTS.md IDENTITY.md TOOLS.md SOUL.md HEARTBEAT.md USER.md ~/hermes/agents/<agent-id>/
-```
-
-### 2. Configure Trello credentials
-
-Set these environment variables (or in your agent's secure config):
-
-```bash
-export TRELLO_API_KEY="your_trello_api_key"
-export TRELLO_TOKEN="your_trello_oauth_token"
-export TRELLO_BOARD_ID="your_board_id"  # Found in the board URL: trello.com/b/<BOARD_ID>/...
-```
-
-### 3. Install the sync script
-
-```bash
-cp scripts/trello-sync.py /path/to/central-tasks/scripts/trello-sync.py
-chmod +x /path/to/central-tasks/scripts/trello-sync.py
-```
-
-### 4. Install the dispatcher
-
-```bash
-cp scripts/trello-dispatcher.py /path/to/central-tasks/scripts/trello-dispatcher.py
-chmod +x /path/to/central-tasks/scripts/trello-dispatcher.py
-```
-
-### 4. Initialise the database
-
-```bash
-python3 /path/to/central-tasks/scripts/trello-sync.py --init
-```
-
-### 5. Schedule the sync
-
-Add a cron job (example every 5 minutes):
-
-```bash
-# OpenClaw cron example
-openclaw cron add --name "trello-sync" \
-  --schedule "every 5m" \
-  --payload "Run /path/to/central-tasks/scripts/trello-sync.py and report only on errors" \
-  --session isolated
-```
-
-Or via cron expression (every 5 min):
-
-```
-*/5 * * * *
-```
-
-## Central database
-
-The sync script uses SQLite at `~/central-tasks/tasks.db` with this schema:
-
-```sql
-CREATE TABLE tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  trello_card_id TEXT UNIQUE NOT NULL,
-  title TEXT NOT NULL,
-  description TEXT,
-  status TEXT NOT NULL,  -- 'todo' | 'in_progress' | 'blocked' | 'done'
-  column_name TEXT NOT NULL,
-  assigned_agent TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  completed_at DATETIME,
-  blocked_reason TEXT,
-  completion_summary TEXT
-);
-```
-
-## Dispatcher
-
-Run the dispatcher frequently so labeled cards are pushed to the right agent immediately. A one-minute timer is the recommended default. The script tracks notifications in SQLite so it does not spam the same card.
-Cards with the `Jason` label are skipped entirely and left for the human.
-
-Recommended systemd timer files are included in `systemd/`:
-
-```bash
-sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.service /etc/systemd/system/trello-agent-dispatcher.service
-sudo install -o root -g root -m 0644 systemd/trello-agent-dispatcher.timer /etc/systemd/system/trello-agent-dispatcher.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now trello-agent-dispatcher.timer
-```
-
-## Daily report
-
-Generate a daily report (example cron at 7 PM):
-
-```
-0 19 * * * /path/to/central-tasks/scripts/trello-sync.py --report
-```
-
-Report includes:
-- All tasks created today
-- Current status of every active task (with column name)
-- Any Blocked tasks with their full blocked comment
-
-## SKILL.md contents
-
-- `SKILL.md` — this file; protocol overview + install
-- `AGENTS.md` — rules for all agents (task creation, column rules, blocked/done formats)
-- `IDENTITY.md` — agent persona (e.g., "Trello Agent")
-- `TOOLS.md` — Trello API notes, sync script path, environment variables
-- `SOUL.md` — core behavioral guidelines
-- `HEARTBEAT.md` — periodic sync checklist (if applicable)
-- `USER.md` — user-specific context (board URL, reporting channel, etc.)
-- `scripts/trello-sync.py` — the sync engine (Python 3, no external dependencies beyond `requests`)
-
-## Supported agent harnesses
-
-Tested / compatible with:
-- **OpenClaw** — native plugin, cron scheduling, agent workspaces
-- **Hermes / Paperclip** — via SSH/agent-run, same sync script
-- **Any agent** that can run Python and make API calls
-
-## Safety notes
-
-- Never commit `TRELLO_API_KEY`, `TRELLO_TOKEN`, or any secrets to the repo
-- The sync script is read-mostly; it only creates/moves comments on Trello
-- The DB file (`tasks.db`) is local only; no network exposure
-- Review the blocked comment format before deploying to ensure it matches your workflow
-
-## License
-
-MIT — free to use, modify, and distribute in any AI agent harness.
+The Trello board is **Public** — any agent can read cards at the board URL
+(`https://trello.com/b/Fi5EnmrN/jasons-goal-board`) without authentication.
+Write operations require the API proxy.
