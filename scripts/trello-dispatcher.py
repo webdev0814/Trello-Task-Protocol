@@ -56,6 +56,15 @@ AGENT_LABELS = {
 }
 
 
+def is_jason_labeled(card: dict) -> bool:
+    labels = card.get("labels") or []
+    for label in labels:
+        name = (label.get("name") or "").strip().lower()
+        if "jason" in name:
+            return True
+    return False
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -180,7 +189,7 @@ def label_agent(card: dict) -> str | None:
     labels = card.get("labels") or []
     for label in labels:
         name = (label.get("name") or "").strip().lower()
-        if name == "jason":
+        if "jason" in name:
             return None
         if name in AGENT_LABELS:
             return AGENT_LABELS[name]
@@ -193,8 +202,7 @@ def is_instruction_card(card: dict) -> bool:
 
 
 def choose_agent(card: dict) -> str:
-    labels = card.get("labels") or []
-    if any((label.get("name") or "").strip().lower() == "jason" for label in labels):
+    if is_jason_labeled(card):
         return "Jason"
     labeled = label_agent(card)
     if labeled:
@@ -271,6 +279,10 @@ def card_actions(card_id: str) -> list[dict]:
         f"/cards/{card_id}/actions?filter=commentCard,updateCard:idList&limit=10&fields=id,type,date,data"
     )
     return actions or []
+
+
+def get_card(card_id: str) -> dict:
+    return trello(f"/cards/{card_id}?fields=name,desc,idList,url,shortLink,closed,dateLastActivity,labels&labels=all")
 
 
 def latest_action_id(actions: list[dict]) -> str | None:
@@ -452,6 +464,10 @@ def dispatch_once(dry_run: bool = False) -> int:
             if notify:
                 if dry_run:
                     print(f"Would notify {agent}: {card.get('name')} ({reason})")
+                    continue
+                current_card = get_card(card["id"])
+                if is_jason_labeled(current_card):
+                    add_event(conn, card["id"], "ignored_jason_labeled_card", "Card labeled Jason is reserved for the human and skipped by agents")
                     continue
                 ok, out = notify_agent(agent, card, list_name, reason)
                 if ok:
