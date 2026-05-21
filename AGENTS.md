@@ -12,6 +12,7 @@ Every task created by any agent must appear as a Trello card. No exceptions.
 - `In Progress`
 - `Blocked`
 - `Done`
+- `Jason` is a human-only label. Cards with that label are ignored by agents and dispatcher automation.
 
 ## Task lifecycle
 
@@ -62,3 +63,4 @@ When task is fully complete:
 - Blocked cards must have the exact blocked comment format before moving
 - Done cards must have a completion summary before moving
 - Trello and `tasks.db` must always be in sync
+- Cards labeled `Jason` are reserved for the human and must not be claimed, moved, or dispatched by agents

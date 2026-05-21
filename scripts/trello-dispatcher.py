@@ -36,6 +36,7 @@ CLAIM_COMMENT = "Starting work"
 
 
 AGENT_LABELS = {
+    "jason": None,
     "pam": "Pam",
     "pam beesly": "Pam",
     "pam 🐻": "Pam",
@@ -179,6 +180,8 @@ def label_agent(card: dict) -> str | None:
     labels = card.get("labels") or []
     for label in labels:
         name = (label.get("name") or "").strip().lower()
+        if name == "jason":
+            return None
         if name in AGENT_LABELS:
             return AGENT_LABELS[name]
     return None
@@ -190,6 +193,9 @@ def is_instruction_card(card: dict) -> bool:
 
 
 def choose_agent(card: dict) -> str:
+    labels = card.get("labels") or []
+    if any((label.get("name") or "").strip().lower() == "jason" for label in labels):
+        return "Jason"
     labeled = label_agent(card)
     if labeled:
         return labeled
@@ -362,6 +368,8 @@ def notify_hermes(agent: str, card: dict, list_name: str, reason: str) -> tuple[
 
 
 def notify_agent(agent: str, card: dict, list_name: str, reason: str) -> tuple[bool, str]:
+    if agent == "Jason":
+        return False, "Jason-labeled cards are intentionally ignored by agents"
     if agent == "Pam":
         return notify_pam(card, list_name, reason)
     if agent == "Milton":
@@ -428,6 +436,9 @@ def dispatch_once(dry_run: bool = False) -> int:
             if list_name not in WATCH_LISTS:
                 continue
             agent = choose_agent(card)
+            if agent == "Jason":
+                add_event(conn, card["id"], "ignored_jason_labeled_card", "Card labeled Jason is reserved for the human and skipped by agents")
+                continue
             upsert_task(conn, card, list_name, agent)
             actions = card_actions(card["id"])
             action_id = latest_action_id(actions)

@@ -13,6 +13,7 @@ A harness-agnostic task management protocol for AI agent systems. Ensures every 
 - The dispatcher claims new labeled To-Do cards with the exact `Starting work` comment and moves them to In Progress so the board visibly advances
 - Dispatch state is idempotent and records last list, last action, notification time, claimed time, and escalation time
 - Stale To-Do cards are re-notified and escalated to Milton; stale In Progress cards are pinged for progress
+- Cards labeled `Jason` are human-owned and are ignored by all agent automation
 - Daily evening report generated automatically
 
 ## Architecture
@@ -129,6 +130,7 @@ CREATE TABLE tasks (
 ## Dispatcher
 
 Run the dispatcher frequently so labeled cards are pushed to the right agent immediately. A one-minute timer is the recommended default. The script tracks notifications in SQLite so it does not spam the same card.
+Cards with the `Jason` label are skipped entirely and left for the human.
 
 Recommended systemd timer files are included in `systemd/`:
 
