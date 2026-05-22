@@ -211,10 +211,24 @@ def move_card(card_id: str, list_id: str) -> None:
     trello(f"/cards/{card_id}", method="PUT", data={"idList": list_id})
 
 
-def sync_once() -> None:
+def sync_once(dry_run: bool = False) -> None:
     lists = list_map()
     reverse = {v: k for k, v in lists.items()}
     cards = trello(f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed&labels=all")
+    if dry_run:
+        counts = {name: 0 for name in ALLOWED_LISTS}
+        for card in cards:
+            if card.get("closed"):
+                continue
+            list_name = reverse.get(card["idList"])
+            if list_name:
+                counts[list_name] += 1
+        print(
+            "trello-sync dry run: "
+            + ", ".join(f"{name}={counts[name]}" for name in ALLOWED_LISTS)
+            + f", total_open_allowed={sum(counts.values())}"
+        )
+        return
     conn = sqlite3.connect(DB_PATH)
     ensure_schema(conn)
     try:
@@ -290,7 +304,11 @@ def daily_report() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Validate Trello access and report card counts without writing")
     args = parser.parse_args()
+    if args.dry_run:
+        sync_once(dry_run=True)
+        return 0
     if args.report:
         sync_once()
         print(daily_report())
