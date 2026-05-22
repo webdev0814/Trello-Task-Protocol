@@ -70,3 +70,35 @@ When task is fully complete:
 When creating a Trello card, you MUST immediately apply your agent label to it
 (e.g., `Kevin 🧮`, `Michael 🎤`, `Dwight 🏃`, `Pam 🐻`). Unlabeled cards in
 To-Do will NOT be dispatched automatically.
+
+## Mandatory Telegram + DoD Rule
+
+Applies to all agents: Pam, Michael, Dwight, and Kevin.
+
+When a user posts a task in Telegram:
+
+1. Immediately create a Trello card in `To-Do`.
+2. Set the card title to a one-line task summary.
+3. Set the card description to the full task plus:
+
+```
+Definition of Done:
+- [measurable #1]
+- [measurable #2]
+- Verified by [who/how]
+```
+
+4. Add your own agent label: `Pam`, `Michael`, `Dwight`, or `Kevin`.
+5. Post an initial plan comment.
+6. Move the card to `In Progress` if unblocked.
+
+## Proactive Work Rule
+
+Poll your `In Progress` cards every heartbeat. Work until blocked or done:
+
+- If blocked, use the exact 🔴 BLOCKED format.
+- If Definition of Done is met, add a completion summary and move the card to `Done`.
+
+## Comment Rule
+
+On any comment to your card, whether received through the `commentCard` webhook or a dispatcher ping, resume work immediately until blocked or done.

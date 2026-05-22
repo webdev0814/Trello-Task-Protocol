@@ -23,6 +23,14 @@ Most agent frameworks don't enforce task management. This protocol does.
 - **Automated daily reports** — every evening, a report goes out showing new tasks, active tasks, and blocked tasks
 - **Harness-agnostic** — works with OpenClaw, Hermes/Paperclip, or any AI agent that can run Python and call APIs
 
+## Updated Telegram Integration
+
+Agents now auto-create cards from Telegram messages with an enforced Definition of Done. User comments trigger immediate agent notification and resume through the Trello `commentCard` webhook or the one-minute dispatcher.
+
+## Agents Updated
+
+Pam, Michael, Dwight, and Kevin inherit the Telegram task-to-card rule, the Definition of Done requirement, proactive work until blocked or done, and comment-triggered resume behavior.
+
 ---
 
 ## Core concepts
