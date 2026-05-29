@@ -162,10 +162,11 @@ It is the active layer that makes Trello proactive:
 - Watches only `To-Do` and `In Progress`.
 - Maps Trello labels to the correct agent.
 - Writes local dispatch state with `card_id`, `assigned_agent`, `last_list`, `last_action_id`, `notified_at`, `claimed_at`, and escalation metadata.
-- On a new labeled `To-Do` card, notifies the assigned agent, adds the exact `Starting work` comment, and moves the card to `In Progress`.
+- On a new labeled `To-Do` card, notifies the assigned agent once, adds the exact `Starting work` comment, and moves the card to `In Progress`.
 - Re-runs idempotently so the same card does not notify every polling cycle.
 - Re-notifies stale `To-Do` cards and escalates unclaimed work to Milton after the watchdog threshold.
-- Pings stale `In Progress` cards so the assigned agent resumes, marks blocked, or completes.
+- Pings `In Progress` cards only when there is new meaningful activity to react to, not on a fixed spam loop.
+- Ignores `Jason`-labeled cards entirely.
 
 ### Usage
 

@@ -13,8 +13,8 @@ This is enforced because:
 ### Enforcement in the dispatcher
 
 The dispatcher at `scripts/trello-dispatcher.py` will:
-- Skip `Jason`-labeled cards silently
-- If a `Jason`-labeled card also detects an agent name/keyword in the title, log a warning
+- Skip `Jason`-labeled cards silently and leave no comments or moves on them
+- If a `Jason`-labeled card also detects an agent name/keyword in the title, ignore it without side effects
 - Auto-claim cards it notifies by adding "Starting work" and moving them to `In Progress`
 - Watchdog: If a `To-Do` card stays unclaimed for 15 minutes, notify Milton
 

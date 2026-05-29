@@ -206,6 +206,10 @@ def forget_dispatch_state(conn: sqlite3.Connection, card_id: str) -> None:
     )
 
 
+def clear_dispatch_state(conn: sqlite3.Connection, card_id: str) -> None:
+    conn.execute("DELETE FROM trello_dispatch_state WHERE trello_card_id = ?", (card_id,))
+
+
 def is_instruction_card(card: dict) -> bool:
     name = (card.get("name") or "").strip().lower()
     return name.startswith("📌 how to use this column") or name.startswith("how to use this column")
@@ -458,10 +462,10 @@ def should_notify(state, list_name: str, date_last_activity: str | None, action_
     notified_at = notified_at or 0
     if last_list != list_name:
         return True, f"card moved from {last_list} to {list_name}"
+    if action_id and action_id != last_action_id:
+        return True, "new Trello activity on card"
     if list_name == "To-Do" and now - notified_at >= CLAIM_RENOTIFY_SECONDS:
         return True, "To-Do card still unclaimed"
-    if list_name == "In Progress" and now - notified_at >= IN_PROGRESS_STALE_SECONDS:
-        return True, "In Progress card needs daily progress check"
     return False, "already dispatched"
 
 
@@ -507,11 +511,11 @@ def dispatch_once(dry_run: bool = False) -> int:
             if list_name not in WATCH_LISTS:
                 continue
             if is_jason_labeled(card):
-                forget_dispatch_state(conn, card["id"])
+                clear_dispatch_state(conn, card["id"])
                 continue
             agent = choose_agent(card)
             if agent == "Jason":
-                forget_dispatch_state(conn, card["id"])
+                clear_dispatch_state(conn, card["id"])
                 continue
             upsert_task(conn, card, list_name, agent)
             actions = card_actions(card["id"])
@@ -523,13 +527,6 @@ def dispatch_once(dry_run: bool = False) -> int:
                 (card["id"],),
             ).fetchone()
             notify, reason = should_notify(state, list_name, card.get("dateLastActivity"), action_id)
-            if (
-                notify
-                and state is not None
-                and list_name == "In Progress"
-                and latest_meaningful_action_ts(actions) > (state[5] or 0)
-            ):
-                notify, reason = False, "recent non-dispatcher activity"
             if notify:
                 if dry_run:
                     print(f"Would notify {agent}: {card.get('name')} ({reason})")

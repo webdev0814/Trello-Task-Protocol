@@ -26,7 +26,8 @@ Every task created by any agent must appear as a Trello card. No exceptions.
 
 ### In Progress
 - Agent is actively working on the task
-- Add progress comments to the card as needed
+- Add one substantive progress comment only when there is real progress, a concrete blocker, or completion
+- If the card is labeled `Jason`, do not comment, move, or dispatch it
 - If blocked, move to Blocked and add the blocked comment (see below)
 
 ### Blocked
@@ -51,7 +52,7 @@ When task is fully complete:
 
 - **Trello Agent**: creates cards, moves cards, updates comments as instructed by other agents or humans
 - **All agents**: must use Trello for all tasks; no task tracking outside Trello
-- **Dispatcher**: monitors labeled To-Do/In Progress cards every 1-2 minutes, notifies assigned agents, claims new To-Do cards, and escalates stale unclaimed cards
+- **Dispatcher**: monitors labeled To-Do/In Progress cards every 1-2 minutes, notifies assigned agents only on new meaningful activity or first assignment, claims new To-Do cards, and escalates stale unclaimed cards
 - **Central orchestrator (Milton/main)**: receives watchdog escalations and owns routing until transfer to Michael is explicitly approved
 
 ## Permanent rules
@@ -63,7 +64,7 @@ When task is fully complete:
 - Blocked cards must have the exact blocked comment format before moving
 - Done cards must have a completion summary before moving
 - Trello and `tasks.db` must always be in sync
-- Cards labeled `Jason` are reserved for the human and must not be claimed, moved, or dispatched by agents
+- Cards labeled `Jason` are reserved for the human and must not be claimed, moved, commented on, or dispatched by agents
 
 ## Hard Rule: Agents Must Label Their Own Cards
 
@@ -98,6 +99,7 @@ Poll your `In Progress` cards every heartbeat. Work until blocked or done:
 
 - If blocked, use the exact 🔴 BLOCKED format.
 - If Definition of Done is met, add a completion summary and move the card to `Done`.
+- If the card is labeled `Jason`, ignore it completely.
 
 ## Comment Rule
 
@@ -110,3 +112,7 @@ For non-trivial changes to this Trello automation, dispatcher, sync logic, cron 
 - QA the live/deployed behavior when possible, not only the diff.
 - Return PASS/FAIL, evidence checked, and any required fix.
 - If QA finds a second source of the same spam or routing problem, fix that source too before closing.
+
+## Standing QA Rule
+
+Every non-trivial update to this protocol, dispatcher, or Trello automation must be QA'd by Dwight before it is pushed or declared done.
