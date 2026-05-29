@@ -315,6 +315,44 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._send_json(status, result)
             return
 
+        # POST /trello-api/creds/get
+        if self.path == "/trello-api/creds/get":
+            if not self._require_proxy_secret():
+                return
+            try:
+                data = json.loads(body.decode("utf-8")) if body else {}
+            except:
+                self._send_json(400, {"error": "invalid JSON"})
+                return
+            raw = data.get("name", "")
+            # Normalize: lowercase with underscores to uppercase env var names
+            norm = raw.strip().upper()
+            config_path = os.path.expanduser("~/.openclaw/openclaw.json")
+            try:
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                env = cfg.get("env", {})
+                value = None
+                secret_paths = {
+                    "TRELLO_PROXY_SECRET": "~/.openclaw/trello_proxy_secret",
+                    "GCLOUD_SERVICE_ACCOUNT_KEY": "~/.openclaw/credentials/drive-key.json",
+                }
+                if norm in secret_paths:
+                    spath = os.path.expanduser(secret_paths[norm])
+                    if os.path.exists(spath):
+                        with open(spath) as f:
+                            value = f.read().strip()
+                elif norm in env:
+                    value = env[norm]
+                if value is None:
+                    self._send_json(404, {"error": f"Unknown credential: {raw}"})
+                    return
+                self._send_json(200, {"name": raw, "value": value})
+            except Exception as e:
+                log.error(f"Error reading credential '{raw}': {e}")
+                self._send_json(500, {"error": str(e)})
+            return
+
         # --- Original Trello / Jira webhook handling ---
         try:
             data = json.loads(body.decode("utf-8"))
@@ -517,6 +555,7 @@ def main():
     log.info(f"  POST /trello-api/add-label            — add label to card")
     log.info(f"  POST /trello-api/list-labels          — list board labels")
     log.info(f"  POST /trello-api/list-lists           — list board lists")
+    log.info(f"  POST /trello-api/creds/get              — retrieve a credential by name")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
