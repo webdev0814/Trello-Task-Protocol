@@ -216,7 +216,10 @@ def upsert_card(conn: sqlite3.Connection, card: dict, list_name: str, agent: str
 
 
 def add_comment(card_id: str, text: str) -> None:
-    trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": text})
+    """Add a comment to a Trello card with Milton attribution."""
+    short_line = text.split(chr(10))[0] if chr(10) in text else text[:60]
+    prefixed = f"Agent: Milton\nAction: {short_line}\nAt: {utc_now()}\n\n{text}"
+    trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": prefixed})
 
 
 def move_card(card_id: str, list_id: str) -> None:

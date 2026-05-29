@@ -3,6 +3,7 @@
    Also serves as a Trello API proxy for Hermes agents."""
 
 import json, os, sys, hmac, hashlib, re, logging
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 
@@ -16,6 +17,8 @@ TRELLO_PROXY_BASE = "https://141.148.88.85/trello-api"
 # Load creds
 CONFIG_PATH = os.path.expanduser("~/.openclaw/openclaw.json")
 TRELLO_KEY = TRELLO_TOKEN = None
+PROXY_SECRET_PATH = os.path.expanduser("~/.openclaw/trello_proxy_secret")
+PROXY_SECRET = None
 try:
     with open(CONFIG_PATH) as f:
         cfg = json.load(f)
@@ -23,6 +26,12 @@ try:
     TRELLO_TOKEN = cfg.get("env", {}).get("TRELLO_TOKEN")
 except Exception as e:
     log.error(f"Cannot load config: {e}")
+
+try:
+    with open(PROXY_SECRET_PATH) as f:
+        PROXY_SECRET = f.read().strip()
+except Exception as e:
+    log.error(f"Cannot load Trello proxy secret: {e}")
 
 # Agent emoji -> Telegram target mapping
 AGENT_ROUTES = {
@@ -41,6 +50,44 @@ LABEL_TO_AGENT = {
     "Dwight \U0001f3c3": "\U0001f3c3",
     "Kevin \U0001f9ee": "\U0001f9ee",
 }
+
+AGENT_LABELS = {
+    "jason": ("Jason", "6a0f56ebba3a41946dd7499b"),
+    "pam": ("Pam", "69f9fbaf82c748c09954c907"),
+    "pam beesly": ("Pam", "69f9fbaf82c748c09954c907"),
+    "michael": ("Michael", "69f9fbb06314b722effa005c"),
+    "kevin": ("Kevin", "69fe110d10bd665905019680"),
+    "dwight": ("Dwight", "69f9fbb0472161ddc71320a6"),
+    "milton": ("Milton", "69f9fbafd289bfdc755103b6"),
+}
+
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def normalize_agent(value):
+    key = str(value or "").strip().lower()
+    return AGENT_LABELS.get(key)
+
+
+def attribution_block(agent, action):
+    return f"Agent: {agent}\nAction: {action}\nAt: {utc_now()}"
+
+
+def attributed_comment(agent, action, text):
+    body = str(text or "").strip()
+    return f"{attribution_block(agent, action)}\n\n{body}"
+
+
+def attributed_description(agent, source, desc):
+    body = str(desc or "").strip()
+    created = (
+        f"Created by: {agent}\n"
+        f"Created via: {source or 'Trello API proxy'}\n"
+        f"Created at: {utc_now()}"
+    )
+    return f"{created}\n\n---\n\n{body}" if body else created
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -73,6 +120,31 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def _require_proxy_secret(self):
+        if not PROXY_SECRET:
+            self._send_json(500, {"error": "Trello proxy secret not configured"})
+            return False
+        supplied = self.headers.get("X-Proxy-Agent-Secret", "")
+        if not hmac.compare_digest(supplied, PROXY_SECRET):
+            self._send_json(403, {"error": "valid X-Proxy-Agent-Secret header required"})
+            return False
+        return True
+
+    def _label_id_for_name(self, value):
+        if not value:
+            return None
+        agent_info = normalize_agent(value)
+        if agent_info:
+            return agent_info[1]
+        wanted = str(value).strip().lower()
+        result, status = self._trello_api("GET", f"/boards/{BOARD_ID}/labels?fields=name,id,color")
+        if status != 200:
+            return None
+        for label in result:
+            if (label.get("name") or "").strip().lower() == wanted:
+                return label.get("id")
+        return None
 
     # ---- GET ----
     def do_GET(self):
@@ -108,8 +180,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # PUT /trello-api/move-card
         if self.path == "/trello-api/move-card":
+            if not self._require_proxy_secret():
+                return
             card_id = data.get("cardId") or data.get("id")
-            list_id = data.get("listId")
+            list_id = data.get("listId") or data.get("idList")
             if not card_id or not list_id:
                 self._send_json(400, {"error": "cardId and listId required"})
                 return
@@ -118,17 +192,52 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._send_json(status, result)
             return
 
+        # PUT /trello-api/add-label
+        if self.path == "/trello-api/add-label":
+            if not self._require_proxy_secret():
+                return
+            card_id = data.get("cardId") or data.get("id")
+            label_id = data.get("labelId") or self._label_id_for_name(data.get("labelName"))
+            if not card_id or not label_id:
+                self._send_json(400, {"error": "cardId and labelId or labelName required"})
+                return
+            result, status = self._trello_api(
+                "POST", f"/cards/{card_id}/idLabels",
+                json.dumps({"value": label_id}).encode()
+            )
+            self._send_json(status, result)
+            return
+
         # PUT /trello-api/add-comment
         if self.path == "/trello-api/add-comment":
+            if not self._require_proxy_secret():
+                return
             card_id = data.get("cardId") or data.get("id")
             text = data.get("text")
-            if not card_id or not text:
-                self._send_json(400, {"error": "cardId and text required"})
+            agent_info = normalize_agent(data.get("agent"))
+            action = data.get("action", "Comment")
+            if not card_id or not text or not agent_info:
+                self._send_json(400, {"error": "cardId, text, and valid agent required"})
                 return
-            payload = json.dumps({"text": text}).encode()
+            agent, _label_id = agent_info
+            payload = json.dumps({"text": attributed_comment(agent, action, text)}).encode()
             result, status = self._trello_api(
                 "POST", f"/cards/{card_id}/actions/comments", payload
             )
+            self._send_json(status, result)
+            return
+
+        # PUT /trello-api/close-card
+        if self.path == "/trello-api/close-card":
+            if not self._require_proxy_secret():
+                return
+            card_id = data.get("cardId") or data.get("id")
+            closed = data.get("closed", True)
+            if not card_id:
+                self._send_json(400, {"error": "cardId required"})
+                return
+            payload = json.dumps({"closed": bool(closed)}).encode()
+            result, status = self._trello_api("PUT", f"/cards/{card_id}", payload)
             self._send_json(status, result)
             return
 
@@ -143,6 +252,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # --- Trello API proxy endpoints ---
         # POST /trello-api/create-card
         if self.path == "/trello-api/create-card":
+            if not self._require_proxy_secret():
+                return
             try:
                 data = json.loads(body.decode("utf-8")) if body else {}
             except:
@@ -150,26 +261,36 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 return
             name = data.get("name", "New Task")
             desc = data.get("desc", "")
-            id_list = data.get("idList")
-            if not id_list:
-                self._send_json(400, {"error": "idList required"})
+            id_list = data.get("idList") or data.get("listId")
+            agent_info = normalize_agent(data.get("agent"))
+            if not id_list or not agent_info:
+                self._send_json(400, {"error": "idList and valid agent required"})
                 return
-            payload = json.dumps({"name": name, "desc": desc, "idList": id_list}).encode()
+            agent, label_id = agent_info
+            source = data.get("source", "Trello API proxy")
+            payload = json.dumps({
+                "name": name,
+                "desc": attributed_description(agent, source, desc),
+                "idList": id_list,
+                "idLabels": label_id,
+            }).encode()
             result, status = self._trello_api("POST", "/cards", payload)
             self._send_json(status, result)
             return
 
         # POST /trello-api/add-label
         if self.path == "/trello-api/add-label":
+            if not self._require_proxy_secret():
+                return
             try:
                 data = json.loads(body.decode("utf-8")) if body else {}
             except:
                 self._send_json(400, {"error": "invalid JSON"})
                 return
             card_id = data.get("cardId") or data.get("id")
-            label_id = data.get("labelId")
+            label_id = data.get("labelId") or self._label_id_for_name(data.get("labelName"))
             if not card_id or not label_id:
-                self._send_json(400, {"error": "cardId and labelId required"})
+                self._send_json(400, {"error": "cardId and labelId or labelName required"})
                 return
             result, status = self._trello_api(
                 "POST", f"/cards/{card_id}/idLabels",

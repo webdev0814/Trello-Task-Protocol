@@ -277,7 +277,10 @@ def add_event(conn: sqlite3.Connection, card_id: str, event_type: str, detail: s
 
 
 def trello_comment(card_id: str, text: str) -> None:
-    trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": text})
+    """Add a comment to a Trello card with Milton/Dispatcher attribution."""
+    short_line = text.split(chr(10))[0] if chr(10) in text else text[:60]
+    prefixed = f"Agent: Milton\nAction: {short_line}\nAt: {utc_now()}\n\n{text}"
+    trello(f"/cards/{card_id}/actions/comments", method="POST", data={"text": prefixed})
 
 
 def move_card(card_id: str, list_id: str) -> None:
@@ -343,9 +346,9 @@ def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
     desc = card.get("desc") or "(no description)"
     card_id = card.get("id", "")
     short_link = card.get("shortLink", card_id[:8] if card_id else "")
-    add_comment_example = '{"cardId":"ID","text":"..."}'
+    add_comment_example = '{"cardId":"ID","agent":"Dwight","action":"Progress update","text":"..."}'
     move_card_example = '{"cardId":"ID","listId":"LIST_ID"}'
-    create_card_example = '{"name":"...","idList":"LIST_ID"}'
+    create_card_example = '{"name":"...","listId":"LIST_ID","agent":"Dwight","source":"trello-dispatcher","desc":"..."}'
     api_url_display = api_url  # use the env variable
     return (
         f"Trello task assigned to {agent}.\n\n"
@@ -359,10 +362,11 @@ def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
         "The Trello board is now PUBLIC, so you can read cards at the URL above without authentication.\n"
         f"For WRITE operations (comment, move, create), use this Trello API proxy:\n"
         f"  Proxy URL: {api_url}\n"
+        "  Secret header: -H \"X-Proxy-Agent-Secret: $(cat ~/.openclaw/trello_proxy_secret)\"\n"
         f"  - Read card details:   curl {api_url}/card/<shortLink>\n"
-        f"  - Add comment:         curl -X PUT {api_url}/add-comment -d '{add_comment_example}'\n"
-        f"  - Move card:           curl -X PUT {api_url}/move-card -d '{move_card_example}'\n"
-        f"  - Create card:         curl -X POST {api_url}/create-card -d '{create_card_example}'\n"
+        f"  - Add comment:         curl -X PUT {api_url}/add-comment -H 'Content-Type: application/json' -H \"X-Proxy-Agent-Secret: $(cat ~/.openclaw/trello_proxy_secret)\" -d '{add_comment_example}'\n"
+        f"  - Move card:           curl -X PUT {api_url}/move-card -H 'Content-Type: application/json' -H \"X-Proxy-Agent-Secret: $(cat ~/.openclaw/trello_proxy_secret)\" -d '{move_card_example}'\n"
+        f"  - Create card:         curl -X POST {api_url}/create-card -H 'Content-Type: application/json' -H \"X-Proxy-Agent-Secret: $(cat ~/.openclaw/trello_proxy_secret)\" -d '{create_card_example}'\n"
         f"  - List all lists:      curl -X POST {api_url}/list-lists\n"
         f"  - List all labels:     curl -X POST {api_url}/list-labels\n\n"
         "Required protocol:\n"
