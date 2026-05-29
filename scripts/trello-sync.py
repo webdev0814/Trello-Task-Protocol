@@ -38,6 +38,16 @@ AGENT_LABELS = {
     "milton 🦞": "Milton",
     "orchestrator": "Milton",
 }
+JASON_LABEL_NAMES = {"jason"}
+
+
+def is_jason_labeled(card: dict) -> bool:
+    labels = card.get("labels") or []
+    for label in labels:
+        name = (label.get("name") or "").strip().lower()
+        if name in JASON_LABEL_NAMES:
+            return True
+    return False
 
 
 def utc_now() -> str:
@@ -135,6 +145,8 @@ def list_map() -> dict[str, str]:
 
 
 def choose_agent(card: dict) -> str:
+    if is_jason_labeled(card):
+        return "Jason"
     for label in card.get("labels") or []:
         name = (label.get("name") or "").strip().lower()
         if name in AGENT_LABELS:
@@ -214,7 +226,7 @@ def move_card(card_id: str, list_id: str) -> None:
 def sync_once(dry_run: bool = False) -> None:
     lists = list_map()
     reverse = {v: k for k, v in lists.items()}
-    cards = trello(f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed&labels=all")
+    cards = trello(f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed,labels&labels=all")
     if dry_run:
         counts = {name: 0 for name in ALLOWED_LISTS}
         for card in cards:
@@ -240,14 +252,17 @@ def sync_once(dry_run: bool = False) -> None:
             list_name = reverse.get(card["idList"])
             if not list_name:
                 continue
+            if is_jason_labeled(card):
+                upsert_card(conn, card, list_name, "Jason")
+                conn.commit()
+                continue
             agent = choose_agent(card)
             was_known = db_task(conn, card["id"]) is not None
             upsert_card(conn, card, list_name, agent)
-            if list_name == "To-Do":
-                prefix = "Registered new Trello task" if not was_known else "Re-queued Trello task"
+            if list_name == "To-Do" and not was_known:
                 add_comment(
                     card["id"],
-                    f"{prefix} in central task database. Assigned agent: {agent}. Awaiting agent claim.",
+                    f"Registered new Trello task in central task database. Assigned agent: {agent}. Awaiting agent claim.",
                 )
                 conn.execute(
                     "INSERT INTO trello_sync_events (trello_card_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",

@@ -102,3 +102,11 @@ Poll your `In Progress` cards every heartbeat. Work until blocked or done:
 ## Comment Rule
 
 On any comment to your card, whether received through the `commentCard` webhook or a dispatcher ping, resume work immediately until blocked or done.
+
+## Dwight QA Gate
+
+For non-trivial changes to this Trello automation, dispatcher, sync logic, cron behavior, or GitHub-pushed code, Dwight must QA the change before it is considered complete.
+
+- QA the live/deployed behavior when possible, not only the diff.
+- Return PASS/FAIL, evidence checked, and any required fix.
+- If QA finds a second source of the same spam or routing problem, fix that source too before closing.
