@@ -31,8 +31,10 @@ ALLOWED_LISTS = ("To-Do", "In Progress", "Blocked", "Done")
 WATCH_LISTS = ("To-Do", "In Progress")
 CLAIM_RENOTIFY_SECONDS = 5 * 60
 ESCALATE_UNCLAIMED_SECONDS = 15 * 60
-IN_PROGRESS_STALE_SECONDS = 60 * 60
+IN_PROGRESS_STALE_SECONDS = 24 * 60 * 60
 CLAIM_COMMENT = "Starting work"
+DISPATCHER_COMMENT_PREFIX = "Dispatcher notified "
+JASON_LABEL_NAMES = {"jason"}
 
 
 AGENT_LABELS = {
@@ -60,7 +62,7 @@ def is_jason_labeled(card: dict) -> bool:
     labels = card.get("labels") or []
     for label in labels:
         name = (label.get("name") or "").strip().lower()
-        if "jason" in name:
+        if name in JASON_LABEL_NAMES:
             return True
     return False
 
@@ -189,11 +191,19 @@ def label_agent(card: dict) -> str | None:
     labels = card.get("labels") or []
     for label in labels:
         name = (label.get("name") or "").strip().lower()
-        if "jason" in name:
+        if name in JASON_LABEL_NAMES:
             return None
         if name in AGENT_LABELS:
             return AGENT_LABELS[name]
     return None
+
+
+def forget_dispatch_state(conn: sqlite3.Connection, card_id: str) -> None:
+    conn.execute("DELETE FROM trello_dispatch_state WHERE trello_card_id = ?", (card_id,))
+    conn.execute(
+        "UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE trello_card_id = ?",
+        ("Jason", utc_now(), card_id),
+    )
 
 
 def is_instruction_card(card: dict) -> bool:
@@ -274,9 +284,9 @@ def move_card(card_id: str, list_id: str) -> None:
     trello(f"/cards/{card_id}", method="PUT", data={"idList": list_id})
 
 
-def card_actions(card_id: str) -> list[dict]:
+def card_actions(card_id: str, limit: int = 50) -> list[dict]:
     actions = trello(
-        f"/cards/{card_id}/actions?filter=commentCard,updateCard:idList&limit=10&fields=id,type,date,data"
+        f"/cards/{card_id}/actions?filter=commentCard,updateCard:idList&limit={limit}&fields=id,type,date,data"
     )
     return actions or []
 
@@ -297,6 +307,30 @@ def has_start_comment(actions: list[dict]) -> bool:
         if text.startswith(CLAIM_COMMENT.lower()) or "starting work" in text:
             return True
     return False
+
+
+def trello_date_to_unix(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+
+def is_dispatcher_comment(action: dict) -> bool:
+    if action.get("type") != "commentCard":
+        return False
+    text = ((action.get("data") or {}).get("text") or "").strip()
+    return text.startswith(DISPATCHER_COMMENT_PREFIX)
+
+
+def latest_meaningful_action_ts(actions: list[dict]) -> int:
+    for action in actions:
+        if is_dispatcher_comment(action):
+            continue
+        return trello_date_to_unix(action.get("date"))
+    return 0
 
 
 def shell(args: list[str], timeout: int = 30) -> tuple[int, str]:
@@ -334,10 +368,11 @@ def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
         "Required protocol:\n"
         "1. Read the Trello card details first.\n"
         "2. If it is in To-Do, add the exact starting comment 'Starting work' and move it to In Progress.\n"
-        "3. Work the task immediately.\n"
-        "4. If blocked, add the exact BLOCKED comment format and move it to Blocked.\n"
-        "5. If complete, add a short completion summary and move it to Done.\n"
-        "6. Do not create duplicate cards for this same work.\n\n"
+        "3. If it is already In Progress, inspect the card and add a real status comment with one of: progress made, still waiting with reason, blocked with blocker, or complete with summary.\n"
+        "4. Work the task immediately.\n"
+        "5. If blocked, add the exact BLOCKED comment format and move it to Blocked.\n"
+        "6. If complete, add a short completion summary and move it to Done.\n"
+        "7. Do not create duplicate cards for this same work.\n\n"
         f"Description:\n{desc}"
     )
 
@@ -422,7 +457,7 @@ def should_notify(state, list_name: str, date_last_activity: str | None, action_
     if list_name == "To-Do" and now - notified_at >= CLAIM_RENOTIFY_SECONDS:
         return True, "To-Do card still unclaimed"
     if list_name == "In Progress" and now - notified_at >= IN_PROGRESS_STALE_SECONDS:
-        return True, "In Progress card needs progress check"
+        return True, "In Progress card needs daily progress check"
     return False, "already dispatched"
 
 
@@ -453,7 +488,7 @@ def dispatch_once(dry_run: bool = False) -> int:
     lists = list_map()
     reverse = {v: k for k, v in lists.items()}
     cards = trello(
-        f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed,dateLastActivity&labels=all"
+        f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed,dateLastActivity,labels&labels=all"
     )
     conn = sqlite3.connect(DB_PATH)
     ensure_schema(conn)
@@ -467,9 +502,12 @@ def dispatch_once(dry_run: bool = False) -> int:
             list_name = reverse.get(card["idList"])
             if list_name not in WATCH_LISTS:
                 continue
+            if is_jason_labeled(card):
+                forget_dispatch_state(conn, card["id"])
+                continue
             agent = choose_agent(card)
             if agent == "Jason":
-                add_event(conn, card["id"], "ignored_jason_labeled_card", "Card labeled Jason is reserved for the human and skipped by agents")
+                forget_dispatch_state(conn, card["id"])
                 continue
             upsert_task(conn, card, list_name, agent)
             actions = card_actions(card["id"])
@@ -481,13 +519,20 @@ def dispatch_once(dry_run: bool = False) -> int:
                 (card["id"],),
             ).fetchone()
             notify, reason = should_notify(state, list_name, card.get("dateLastActivity"), action_id)
+            if (
+                notify
+                and state is not None
+                and list_name == "In Progress"
+                and latest_meaningful_action_ts(actions) > (state[5] or 0)
+            ):
+                notify, reason = False, "recent non-dispatcher activity"
             if notify:
                 if dry_run:
                     print(f"Would notify {agent}: {card.get('name')} ({reason})")
                     continue
                 current_card = get_card(card["id"])
                 if is_jason_labeled(current_card):
-                    add_event(conn, card["id"], "ignored_jason_labeled_card", "Card labeled Jason is reserved for the human and skipped by agents")
+                    forget_dispatch_state(conn, card["id"])
                     continue
                 ok, out = notify_agent(agent, card, list_name, reason)
                 if ok:
@@ -501,9 +546,6 @@ def dispatch_once(dry_run: bool = False) -> int:
                             "UPDATE tasks SET status = ?, trello_list = ?, updated_at = ? WHERE trello_card_id = ?",
                             (list_name, list_name, utc_now(), card["id"]),
                         )
-                    trello_comment(card["id"], f"Dispatcher notified {agent}. Reason: {reason}.")
-                    updated_actions = card_actions(card["id"])
-                    action_id = latest_action_id(updated_actions) or action_id
                     conn.execute(
                         """
                         INSERT INTO trello_dispatch_state (
