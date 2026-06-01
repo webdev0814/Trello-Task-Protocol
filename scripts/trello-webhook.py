@@ -5,6 +5,7 @@
 import json, os, sys, hmac, hashlib, re, logging
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -61,6 +62,12 @@ AGENT_LABELS = {
     "milton": ("Milton", "69f9fbafd289bfdc755103b6"),
 }
 
+WEBHOOK_STATE_DIR = Path(os.path.expanduser("~/.openclaw/state"))
+WEBHOOK_SEEN_PATH = WEBHOOK_STATE_DIR / "trello-webhook-seen-actions.json"
+WEBHOOK_SEEN_LIMIT = 500
+WEBHOOK_SHADOW_MODE = os.environ.get("TRELLO_WEBHOOK_SHADOW_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+JASON_LABEL_NAMES = {"jason"}
+
 
 def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -90,8 +97,28 @@ def attributed_description(agent, source, desc):
     return f"{created}\n\n---\n\n{body}" if body else created
 
 
+def _load_seen_actions():
+    try:
+        if WEBHOOK_SEEN_PATH.exists():
+            with WEBHOOK_SEEN_PATH.open() as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data[-WEBHOOK_SEEN_LIMIT:]
+    except Exception as exc:
+        log.warning(f"Could not load webhook dedupe state: {exc}")
+    return []
+
+
+def _save_seen_actions(action_ids):
+    WEBHOOK_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with WEBHOOK_SEEN_PATH.open("w") as f:
+        json.dump(action_ids[-WEBHOOK_SEEN_LIMIT:], f)
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     """HTTP handler with webhook receiver + Trello API proxy endpoints."""
+
+    _seen_actions = _load_seen_actions()
 
     # ======================================================================
     #  TRELLO API PROXY  (accessible to Hermes agents via nginx)
@@ -433,10 +460,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def _process_trello_update(self, data):
         action = data.get("action", {})
         action_type = action.get("type", "")
+        action_id = action.get("id", "")
 
         if action_type not in ("commentCard", "updateCard"):
             log.info(f"Skipping Trello action type: {action_type}")
             return
+        if action_id:
+            if action_id in self._seen_actions:
+                log.info(f"Skipping duplicate Trello action: {action_id}")
+                return
+            self._seen_actions.append(action_id)
+            self._seen_actions = self._seen_actions[-WEBHOOK_SEEN_LIMIT:]
+            _save_seen_actions(self._seen_actions)
 
         card = action.get("data", {}).get("card", {})
         card_id = card.get("id", "")
@@ -479,9 +514,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
             req = Request(url)
             resp = urlopen(req, timeout=10)
             card_data = json.loads(resp.read())
-            if not card_data.get("labels"):
+            labels = card_data.get("labels") or []
+            if not labels:
+                log.info(f"Ignoring unlabeled Trello card: {card_id}")
                 return None
-            for label in card_data.get("labels", []):
+            for label in labels:
+                lowered = (label.get("name") or "").strip().lower()
+                if lowered in JASON_LABEL_NAMES:
+                    log.info(f"Ignoring Jason-labeled Trello card: {card_id}")
+                    return None
+            for label in labels:
                 name = label.get("name", "")
                 if name in LABEL_TO_AGENT:
                     return LABEL_TO_AGENT[name]
@@ -499,6 +541,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         agent_label, route = AGENT_ROUTES[agent_emoji]
         log.info(f"Notifying {agent_label}: {message[:80]}...")
+        if WEBHOOK_SHADOW_MODE:
+            log.info(f"Shadow mode enabled; suppressing outbound notification for {agent_label}")
+            return
 
         if route == "docker_exec":
             msg_escaped = message.replace("'", "'\\''")

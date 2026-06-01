@@ -16,7 +16,9 @@ The dispatcher at `scripts/trello-dispatcher.py` will:
 - Skip `Jason`-labeled cards silently and leave no comments or moves on them
 - Skip unlabeled cards silently and leave no comments or moves on them
 - If a `Jason`-labeled card also detects an agent name/keyword in the title, ignore it without side effects
-- Auto-claim cards it notifies by adding "Starting work" and moving them to `In Progress`
+- Notify agents about labeled `To-Do` cards without auto-claiming them
+- Reset stale dispatch state if a card is manually moved back to `To-Do`
+- Only auto-block an `In Progress` card after a real agent claim is visible in Trello
 - Watchdog: If a `To-Do` card stays unclaimed for 15 minutes, notify Milton
 
 ## Trello API Proxy

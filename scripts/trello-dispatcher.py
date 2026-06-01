@@ -296,6 +296,19 @@ def has_start_comment(actions: list[dict]) -> bool:
     return False
 
 
+def claim_comment_ts(actions: list[dict]) -> int:
+    claimed_at = 0
+    for action in reversed(actions):
+        if action.get("type") != "commentCard":
+            continue
+        if is_dispatcher_comment(action):
+            continue
+        text = ((action.get("data") or {}).get("text") or "").strip().lower()
+        if text.startswith(CLAIM_COMMENT.lower()) or "starting work" in text:
+            claimed_at = trello_date_to_unix(action.get("date"))
+    return claimed_at
+
+
 def trello_date_to_unix(value: str | None) -> int:
     if not value:
         return 0
@@ -334,8 +347,8 @@ def blocked_comment_for_agent_timeout(agent: str, reason: str) -> str:
 def should_auto_block_stale_in_progress(state, actions: list[dict]) -> tuple[bool, str]:
     if state is None:
         return False, "not previously dispatched"
-    _, agent, last_list, _, _, notified_at, _, _, dispatch_count, _ = state
-    if last_list != "In Progress" or not notified_at:
+    _, agent, last_list, _, _, notified_at, claimed_at, _, dispatch_count, _ = state
+    if last_list != "In Progress" or not notified_at or not claimed_at:
         return False, "not a tracked In Progress dispatch"
     if unix_now() - notified_at < IN_PROGRESS_ACTION_SLA_SECONDS:
         return False, "agent action SLA has not elapsed"
@@ -524,6 +537,19 @@ def maybe_escalate(conn: sqlite3.Connection, card: dict, list_name: str, agent: 
         add_event(conn, card["id"], "watchdog_escalation_failed", out)
 
 
+def reset_dispatch_cycle(conn: sqlite3.Connection, card: dict, list_name: str, action_id: str | None) -> None:
+    conn.execute(
+        """
+        UPDATE trello_dispatch_state
+        SET last_list = ?, last_activity = ?, last_action_id = ?, notified_at = NULL,
+            claimed_at = NULL, escalated_at = NULL, dispatch_count = 0, updated_at = ?
+        WHERE trello_card_id = ?
+        """,
+        (list_name, card.get("dateLastActivity"), action_id, utc_now(), card["id"]),
+    )
+    add_event(conn, card["id"], "dispatch_cycle_reset", "Card returned to To-Do; dispatch lifecycle reset")
+
+
 def dispatch_once(dry_run: bool = False) -> int:
     lists = list_map()
     reverse = {v: k for k, v in lists.items()}
@@ -553,12 +579,19 @@ def dispatch_once(dry_run: bool = False) -> int:
             upsert_task(conn, card, list_name, agent)
             actions = card_actions(card["id"])
             action_id = latest_action_id(actions)
-            claimed_at = unix_now() if list_name == "In Progress" or has_start_comment(actions) else None
+            claimed_at = claim_comment_ts(actions) or None
             state = conn.execute(
                 "SELECT trello_card_id, assigned_agent, last_list, last_activity, last_action_id, notified_at, claimed_at, escalated_at, dispatch_count, updated_at "
                 "FROM trello_dispatch_state WHERE trello_card_id = ?",
                 (card["id"],),
             ).fetchone()
+            if state and list_name == "To-Do" and state[2] != "To-Do":
+                reset_dispatch_cycle(conn, card, list_name, action_id)
+                state = conn.execute(
+                    "SELECT trello_card_id, assigned_agent, last_list, last_activity, last_action_id, notified_at, claimed_at, escalated_at, dispatch_count, updated_at "
+                    "FROM trello_dispatch_state WHERE trello_card_id = ?",
+                    (card["id"],),
+                ).fetchone()
             auto_block, auto_block_reason = should_auto_block_stale_in_progress(state, actions)
             if auto_block and list_name == "In Progress":
                 if dry_run:
@@ -604,15 +637,6 @@ def dispatch_once(dry_run: bool = False) -> int:
                     ok, out = notify_agent(agent, current_card, list_name, reason)
                 if ok:
                     dispatched += 1
-                    if list_name == "To-Do":
-                        trello_comment(card["id"], CLAIM_COMMENT)
-                        move_card(card["id"], lists["In Progress"])
-                        list_name = "In Progress"
-                        claimed_at = unix_now()
-                        conn.execute(
-                            "UPDATE tasks SET status = ?, trello_list = ?, updated_at = ? WHERE trello_card_id = ?",
-                            (list_name, list_name, utc_now(), card["id"]),
-                        )
                     conn.execute(
                         """
                         INSERT INTO trello_dispatch_state (

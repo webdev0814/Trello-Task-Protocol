@@ -53,7 +53,7 @@ When task is fully complete:
 
 - **Trello Agent**: creates cards, moves cards, updates comments as instructed by other agents or humans
 - **All agents**: must use Trello for all tasks; no task tracking outside Trello
-- **Dispatcher**: monitors labeled To-Do/In Progress/Done cards every 1-2 minutes, notifies assigned agents only on new meaningful activity or first assignment, claims new To-Do cards, escalates stale unclaimed cards, and auto-blocks stale In Progress cards when no verifiable agent action happens after notification
+- **Dispatcher**: monitors labeled To-Do/In Progress/Done cards every 1-2 minutes, notifies assigned agents only on new meaningful activity or first assignment, leaves new To-Do cards unclaimed until the agent claims them in Trello, escalates stale unclaimed cards, and auto-blocks stale In Progress cards only after a verifiable agent claim and no follow-up activity after notification
 - **Central orchestrator (Milton/main)**: receives watchdog escalations and owns routing until transfer to Michael is explicitly approved
 
 ## Permanent rules
