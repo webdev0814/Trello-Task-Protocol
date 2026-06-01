@@ -6,14 +6,15 @@ When any agent creates a new Trello card, they MUST:
 3. Add the initial comment "Starting work" and move it to `In Progress`
 
 This is enforced because:
-- The Trello dispatcher routes cards **only by label and title keywords**
-- An unlabeled card will sit in `To-Do` forever without being dispatched
-- The dispatcher's `choose_agent()` function falls back to keyword matching (e.g., "tax" → Kevin), but label priority ensures correct routing
+- The Trello dispatcher routes cards by label only
+- Unlabeled cards are ignored by the dispatcher until they receive a label
+- The dispatcher's `choose_agent()` function no longer falls back to keyword matching; label priority is the only routing path
 
 ### Enforcement in the dispatcher
 
 The dispatcher at `scripts/trello-dispatcher.py` will:
 - Skip `Jason`-labeled cards silently and leave no comments or moves on them
+- Skip unlabeled cards silently and leave no comments or moves on them
 - If a `Jason`-labeled card also detects an agent name/keyword in the title, ignore it without side effects
 - Auto-claim cards it notifies by adding "Starting work" and moving them to `In Progress`
 - Watchdog: If a `To-Do` card stays unclaimed for 15 minutes, notify Milton

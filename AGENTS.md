@@ -13,6 +13,7 @@ Every task created by any agent must appear as a Trello card. No exceptions.
 - `Blocked`
 - `Done`
 - `Jason` is a human-only label. Cards with that label are ignored by agents and dispatcher automation.
+- Cards with no label are ignored by dispatcher automation until someone labels them.
 
 ## Task lifecycle
 
@@ -52,7 +53,7 @@ When task is fully complete:
 
 - **Trello Agent**: creates cards, moves cards, updates comments as instructed by other agents or humans
 - **All agents**: must use Trello for all tasks; no task tracking outside Trello
-- **Dispatcher**: monitors labeled To-Do/In Progress cards every 1-2 minutes, notifies assigned agents only on new meaningful activity or first assignment, claims new To-Do cards, and escalates stale unclaimed cards
+- **Dispatcher**: monitors labeled To-Do/In Progress/Done cards every 1-2 minutes, notifies assigned agents only on new meaningful activity or first assignment, claims new To-Do cards, escalates stale unclaimed cards, and auto-blocks stale In Progress cards when no verifiable agent action happens after notification
 - **Central orchestrator (Milton/main)**: receives watchdog escalations and owns routing until transfer to Michael is explicitly approved
 
 ## Permanent rules
@@ -70,7 +71,7 @@ When task is fully complete:
 
 When creating a Trello card, you MUST immediately apply your agent label to it
 (e.g., `Kevin 🧮`, `Michael 🎤`, `Dwight 🏃`, `Pam 🐻`). Unlabeled cards in
-To-Do will NOT be dispatched automatically.
+To-Do are ignored by dispatcher automation until they are explicitly labeled.
 
 ## Mandatory Telegram + DoD Rule
 
@@ -99,7 +100,14 @@ Poll your `In Progress` cards every heartbeat. Work until blocked or done:
 
 - If blocked, use the exact 🔴 BLOCKED format.
 - If Definition of Done is met, add a completion summary and move the card to `Done`.
+- If the next step depends on Jason, another person, credentials, external systems, or a broken agent runtime, move the card to `Blocked`; do not park it in `In Progress`.
 - If the card is labeled `Jason`, ignore it completely.
+
+## Closed-Loop Enforcement Rule
+
+Dispatcher notifications are not success. A task is only considered handled when Trello shows the card left `In Progress` for an outcome state: `Blocked` or `Done`.
+
+If a card remains in `In Progress` after an agent notification beyond the configured action SLA, the dispatcher must add the required blocked comment, move the card to `Blocked`, and escalate to Milton for triage.
 
 ## Comment Rule
 

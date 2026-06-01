@@ -167,6 +167,7 @@ It is the active layer that makes Trello proactive:
 - Re-notifies stale `To-Do` cards and escalates unclaimed work to Milton after the watchdog threshold.
 - Pings `In Progress` cards only when there is new meaningful activity to react to, not on a fixed spam loop.
 - Ignores `Jason`-labeled cards entirely.
+- Ignores unlabeled cards until a label is added.
 
 ### Usage
 

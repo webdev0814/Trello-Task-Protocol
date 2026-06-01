@@ -479,6 +479,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             req = Request(url)
             resp = urlopen(req, timeout=10)
             card_data = json.loads(resp.read())
+            if not card_data.get("labels"):
+                return None
             for label in card_data.get("labels", []):
                 name = label.get("name", "")
                 if name in LABEL_TO_AGENT:

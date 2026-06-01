@@ -28,10 +28,11 @@ CREDS_PATH = "/home/ubuntu/.openclaw/trello_credentials.json"
 ENV_PATHS = ("/home/ubuntu/.openclaw/.env", "/home/ubuntu/openclaw/.env")
 SCRIPT_DIR = Path("/home/ubuntu/central-tasks/scripts")
 ALLOWED_LISTS = ("To-Do", "In Progress", "Blocked", "Done")
-WATCH_LISTS = ("To-Do", "In Progress")
+WATCH_LISTS = ("To-Do", "In Progress", "Done")
 CLAIM_RENOTIFY_SECONDS = 5 * 60
 ESCALATE_UNCLAIMED_SECONDS = 15 * 60
 IN_PROGRESS_STALE_SECONDS = 24 * 60 * 60
+IN_PROGRESS_ACTION_SLA_SECONDS = 2 * 60 * 60
 CLAIM_COMMENT = "Starting work"
 DISPATCHER_COMMENT_PREFIX = "Dispatcher notified "
 JASON_LABEL_NAMES = {"jason"}
@@ -206,10 +207,6 @@ def forget_dispatch_state(conn: sqlite3.Connection, card_id: str) -> None:
     )
 
 
-def clear_dispatch_state(conn: sqlite3.Connection, card_id: str) -> None:
-    conn.execute("DELETE FROM trello_dispatch_state WHERE trello_card_id = ?", (card_id,))
-
-
 def is_instruction_card(card: dict) -> bool:
     name = (card.get("name") or "").strip().lower()
     return name.startswith("📌 how to use this column") or name.startswith("how to use this column")
@@ -218,27 +215,10 @@ def is_instruction_card(card: dict) -> bool:
 def choose_agent(card: dict) -> str:
     if is_jason_labeled(card):
         return "Jason"
-    labeled = label_agent(card)
-    if labeled:
-        return labeled
-    text = f"{card.get('name', '')}\n{card.get('desc', '')}".lower()
-    if "kevin" in text or "🧮" in text:
-        return "Kevin"
-    if "dwight" in text or "🏃" in text:
-        return "Dwight"
-    if "pam" in text or "🐻" in text:
-        return "Pam"
-    if "michael" in text or "🎤" in text:
-        return "Michael"
-    if any(word in text for word in ("money", "account", "invoice", "tax", "budget", "finance", "grant", "credit", "refund", "subscription", "billing")):
-        return "Kevin"
-    if any(word in text for word in ("code", "program", "script", "qa", "test", "verify", "ops", "server", "deploy")):
-        return "Dwight"
-    if any(word in text for word in ("email", "calendar", "schedule", "admin", "document", "follow up", "travel")):
-        return "Pam"
-    if any(word in text for word in ("contract", "government", "veteran", "certification", "strategy", "research", "project", "timeline")):
-        return "Michael"
-    return "Milton"
+    labels = card.get("labels") or []
+    if not labels:
+        return None
+    return label_agent(card)
 
 
 def upsert_task(conn: sqlite3.Connection, card: dict, list_name: str, agent: str) -> None:
@@ -340,6 +320,31 @@ def latest_meaningful_action_ts(actions: list[dict]) -> int:
     return 0
 
 
+def blocked_comment_for_agent_timeout(agent: str, reason: str) -> str:
+    return (
+        "🔴 BLOCKED\n"
+        f"Reason: {agent} did not produce a verifiable Trello update after dispatcher notification. {reason}\n"
+        "Needed to Unblock: Assigned agent must inspect the card, complete the work, or post a concrete blocker.\n"
+        f"Who needs to act: {agent}\n"
+        "Estimated resolution: Once the assigned agent resumes and posts a real update.\n"
+        "Workaround (if any): Milton/Dwight should reassign or manually triage if the agent runtime is unavailable."
+    )
+
+
+def should_auto_block_stale_in_progress(state, actions: list[dict]) -> tuple[bool, str]:
+    if state is None:
+        return False, "not previously dispatched"
+    _, agent, last_list, _, _, notified_at, _, _, dispatch_count, _ = state
+    if last_list != "In Progress" or not notified_at:
+        return False, "not a tracked In Progress dispatch"
+    if unix_now() - notified_at < IN_PROGRESS_ACTION_SLA_SECONDS:
+        return False, "agent action SLA has not elapsed"
+    meaningful_ts = latest_meaningful_action_ts(actions)
+    if meaningful_ts > notified_at:
+        return False, "card has meaningful activity after notification"
+    return True, f"Card stayed In Progress without meaningful activity past the agent action SLA after {agent} was notified; dispatch_count={dispatch_count}"
+
+
 def shell(args: list[str], timeout: int = 30) -> tuple[int, str]:
     proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
     return proc.returncode, proc.stdout[-2000:]
@@ -385,6 +390,23 @@ def agent_prompt(card: dict, list_name: str, agent: str, reason: str) -> str:
     )
 
 
+def qa_prompt(card: dict, agent: str, reason: str) -> str:
+    desc = card.get("desc") or "(no description)"
+    return (
+        f"Dwight QA for completed Trello task assigned to {agent}.\n\n"
+        f"Card: {card.get('name', '')}\n"
+        f"URL: {card.get('url', BOARD_URL)}\n"
+        f"Reason: {reason}\n\n"
+        "Required protocol:\n"
+        "1. Read the card and the recent comments.\n"
+        "2. Compare the result against the Definition of Done.\n"
+        "3. Leave a Trello comment that clearly states PASS or FAIL and why.\n"
+        "4. If PASS, leave the card in Done and notify Jason on Telegram.\n"
+        "5. If FAIL, explain what is missing, recommend the fix, move the card back to In Progress, and notify the owner agent immediately.\n\n"
+        f"Description:\n{desc}"
+    )
+
+
 def notify_pam(card: dict, list_name: str, reason: str) -> tuple[bool, str]:
     prompt = agent_prompt(card, list_name, "Pam", reason)
     notice = Path("/home/ubuntu/.openclaw/agents/concierge/workspace/TASK_NOTIFICATION.md")
@@ -411,11 +433,10 @@ def notify_milton(card: dict, list_name: str, reason: str) -> tuple[bool, str]:
     return True, "Milton system event queued asynchronously"
 
 
-def notify_hermes(agent: str, card: dict, list_name: str, reason: str) -> tuple[bool, str]:
+def notify_hermes_prompt(agent: str, prompt: str) -> tuple[bool, str]:
     profile = agent.lower()
-    prompt = agent_prompt(card, list_name, agent, reason)
     log_path = f"/tmp/trello-dispatcher-{profile}.log"
-    remote_file = f"~/.hermes/profiles/{shlex.quote(profile)}/tasks/trello-{shlex.quote(card['id'])}.md"
+    remote_file = f"~/.hermes/profiles/{shlex.quote(profile)}/tasks/trello-dispatcher-{int(time.time())}.md"
     remote = (
         "set -eu; "
         f"mkdir -p ~/.hermes/profiles/{shlex.quote(profile)}/tasks; "
@@ -442,6 +463,10 @@ def notify_hermes(agent: str, card: dict, list_name: str, reason: str) -> tuple[
     return proc.returncode == 0, proc.stdout[-2000:]
 
 
+def notify_hermes(agent: str, card: dict, list_name: str, reason: str) -> tuple[bool, str]:
+    return notify_hermes_prompt(agent, agent_prompt(card, list_name, agent, reason))
+
+
 def notify_agent(agent: str, card: dict, list_name: str, reason: str) -> tuple[bool, str]:
     if agent == "Jason":
         return False, "Jason-labeled cards are intentionally ignored by agents"
@@ -454,6 +479,11 @@ def notify_agent(agent: str, card: dict, list_name: str, reason: str) -> tuple[b
     return False, f"No notifier configured for {agent}"
 
 
+def notify_dwight_qa(card: dict, agent: str, reason: str) -> tuple[bool, str]:
+    prompt = qa_prompt(card, agent, reason)
+    return notify_hermes_prompt("Dwight", prompt)
+
+
 def should_notify(state, list_name: str, date_last_activity: str | None, action_id: str | None) -> tuple[bool, str]:
     now = unix_now()
     if state is None:
@@ -462,10 +492,12 @@ def should_notify(state, list_name: str, date_last_activity: str | None, action_
     notified_at = notified_at or 0
     if last_list != list_name:
         return True, f"card moved from {last_list} to {list_name}"
-    if action_id and action_id != last_action_id:
-        return True, "new Trello activity on card"
     if list_name == "To-Do" and now - notified_at >= CLAIM_RENOTIFY_SECONDS:
         return True, "To-Do card still unclaimed"
+    if list_name == "In Progress" and now - notified_at >= IN_PROGRESS_STALE_SECONDS:
+        return True, "In Progress card needs daily progress check"
+    if list_name == "Done" and last_list != "Done":
+        return True, "card completed and needs Dwight QA"
     return False, "already dispatched"
 
 
@@ -498,7 +530,8 @@ def dispatch_once(dry_run: bool = False) -> int:
     cards = trello(
         f"/boards/{BOARD_ID}/cards?fields=name,desc,idList,url,shortLink,closed,dateLastActivity,labels&labels=all"
     )
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
     ensure_schema(conn)
     dispatched = 0
     try:
@@ -511,11 +544,11 @@ def dispatch_once(dry_run: bool = False) -> int:
             if list_name not in WATCH_LISTS:
                 continue
             if is_jason_labeled(card):
-                clear_dispatch_state(conn, card["id"])
+                forget_dispatch_state(conn, card["id"])
                 continue
             agent = choose_agent(card)
-            if agent == "Jason":
-                clear_dispatch_state(conn, card["id"])
+            if not agent or agent == "Jason":
+                forget_dispatch_state(conn, card["id"])
                 continue
             upsert_task(conn, card, list_name, agent)
             actions = card_actions(card["id"])
@@ -526,7 +559,37 @@ def dispatch_once(dry_run: bool = False) -> int:
                 "FROM trello_dispatch_state WHERE trello_card_id = ?",
                 (card["id"],),
             ).fetchone()
+            auto_block, auto_block_reason = should_auto_block_stale_in_progress(state, actions)
+            if auto_block and list_name == "In Progress":
+                if dry_run:
+                    print(f"Would move to Blocked: {card.get('name')} ({auto_block_reason})")
+                    continue
+                current_card = get_card(card["id"])
+                if is_jason_labeled(current_card):
+                    forget_dispatch_state(conn, card["id"])
+                    continue
+                block_text = blocked_comment_for_agent_timeout(agent, auto_block_reason)
+                trello_comment(card["id"], block_text)
+                move_card(card["id"], lists["Blocked"])
+                conn.execute(
+                    "UPDATE tasks SET status = ?, trello_list = ?, blocked_comment = ?, updated_at = ? WHERE trello_card_id = ?",
+                    ("Blocked", "Blocked", block_text, utc_now(), card["id"]),
+                )
+                conn.execute(
+                    "UPDATE trello_dispatch_state SET last_list = ?, last_activity = ?, escalated_at = ?, updated_at = ? WHERE trello_card_id = ?",
+                    ("Blocked", current_card.get("dateLastActivity"), unix_now(), utc_now(), card["id"]),
+                )
+                add_event(conn, card["id"], "auto_blocked_stale_in_progress", f"{agent}: {auto_block_reason}")
+                notify_milton(current_card, "Blocked", f"Dispatcher moved stale In Progress card to Blocked for {agent}: {auto_block_reason}")
+                continue
             notify, reason = should_notify(state, list_name, card.get("dateLastActivity"), action_id)
+            if (
+                notify
+                and state is not None
+                and list_name == "In Progress"
+                and latest_meaningful_action_ts(actions) > (state[5] or 0)
+            ):
+                notify, reason = False, "recent non-dispatcher activity"
             if notify:
                 if dry_run:
                     print(f"Would notify {agent}: {card.get('name')} ({reason})")
@@ -535,7 +598,10 @@ def dispatch_once(dry_run: bool = False) -> int:
                 if is_jason_labeled(current_card):
                     forget_dispatch_state(conn, card["id"])
                     continue
-                ok, out = notify_agent(agent, card, list_name, reason)
+                if list_name == "Done":
+                    ok, out = notify_dwight_qa(current_card, agent, reason)
+                else:
+                    ok, out = notify_agent(agent, current_card, list_name, reason)
                 if ok:
                     dispatched += 1
                     if list_name == "To-Do":
