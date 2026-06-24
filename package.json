@@ -1,0 +1,25 @@
+{
+  "name": "trello-task-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Trello helper commands for a prompt-contract workflow.",
+  "scripts": {
+    "trello:authorize-url": "node src/commands/print-authorize-url.mjs",
+    "trello:snapshot": "node src/commands/snapshot.mjs",
+    "trello:contracts": "node src/commands/bootstrap-contracts.mjs",
+    "trello:refresh": "node src/commands/refresh-inbox.mjs",
+    "trello:poll": "node src/commands/poll-once.mjs",
+    "trello:comment": "node src/commands/post-comment.mjs",
+    "trello:move": "node src/commands/move-card.mjs",
+    "trello:webhook:serve": "node src/commands/webhook-server.mjs",
+    "trello:webhook:register": "node src/commands/register-webhook.mjs",
+    "trello:webhook:list": "node src/commands/list-webhooks.mjs",
+    "trello:webhook:delete": "node src/commands/delete-webhook.mjs",
+    "trello:webhook:drain": "node src/commands/drain-webhook-queue.mjs",
+    "trello:webhook:sync-oracle": "node src/commands/sync-oracle-webhook-inbox.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

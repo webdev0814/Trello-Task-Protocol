@@ -1,32 +1,10 @@
-# Secrets / credentials
-TRELLO_API_KEY
-TRELLO_TOKEN
-TRELLO_BOARD_ID
-
-# Environment files
 .env
-.env.local
-*.env
-
-# Local database
-*.db
-tasks.db
-
-# Logs
+.env.*
+!.env.example
+data/
+node_modules/
 *.log
-*.log.*
-
-# Temp / staging
-/tmp/
+*.db
 .DS_Store
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyc
-
-# OS
 .vscode/
 .idea/
-*.swp
-*.swo
